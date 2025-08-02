@@ -1,62 +1,46 @@
-import os
-import time
-import re
-import requests
-import redis
-
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
-from dotenv import load_dotenv
-
-load_dotenv()
-PIXEL_ID     = os.getenv("FB_PIXEL_ID")
-ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN")
-VIDEO_ID     = int(os.getenv("VIDEO_ID", "15"))
-REDIS_URL    = os.getenv("REDIS_URL")
-if not PIXEL_ID or not ACCESS_TOKEN or not REDIS_URL:
-    raise RuntimeError("Defina FB_PIXEL_ID, FB_ACCESS_TOKEN e REDIS_URL nas Env Vars")
-
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-pattern = re.compile(r"(?:^|&)(utm_content)=([^&]*)")
+import urllib.parse
+import redis
+import os
 
 app = FastAPI()
 
-def send_fb_event(name, eid, url, ip, ua):
-    endpoint = f"https://graph.facebook.com/v15.0/{PIXEL_ID}/events?access_token={ACCESS_TOKEN}"
-    payload = {
-        "data": [{
-            "event_name": name,
-            "event_time": int(time.time()),
-            "action_source": "website",
-            "event_id": eid,
-            "event_source_url": url,
-            "user_data": {"client_ip_address": ip, "client_user_agent": ua}
-        }]
-    }
-    requests.post(endpoint, json=payload)
+# Conexão Redis
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+r = redis.Redis.from_url(redis_url)
 
-@app.get("/r/{short_code}")
-async def redirect_affiliate(short_code: str, request: Request):
-    """
-    Proxy curto: /r/AKQ4gdI2kq  →  s.shopee.com.br/AKQ4gdI2kq
-    Com UTM automático + deep-link no Instagram.
-    """
-    ua = request.headers.get("user-agent", "")
-    # 1) Incrementa nosso contador
-    contador = redis_client.incr("click_counter")
-    novo = f"v{VIDEO_ID}n{contador}----"
+# Chave do contador global
+COUNTER_KEY = "utm_counter"
 
-    # 2) Monta o affiliate-web e (se quiser) o deep-link
-    affiliate_web = f"https://s.shopee.com.br/{short_code}"
-    # Se quiser deep-link ao app, precisa extrair itemId/shopId:
-    # (exemplo fixo abaixo; ideal é mapear via DB)
-    item_id, shop_id = "1006215031", "25062459693"
-    app_link = f"shopee://product?itemId={item_id}&shopId={shop_id}&utm_content={novo}"
+@app.get("/{path:path}")
+async def redirect_handler(request: Request, path: str):
+    # Pega a URL original com query string completa
+    original_query = str(request.url.query)
+    
+    # Constrói a URL base Shopee com os parâmetros existentes
+    original_link = f"https://shopee.com.br/{path}?{original_query}"
+    
+    # Analisa os parâmetros
+    parsed_url = urllib.parse.urlparse(original_link)
+    query_params = urllib.parse.parse_qs(parsed_url.query)
 
-    # 3) No Instagram in-app, redireciona direto ao app
-    if "Instagram" in ua:
-        return RedirectResponse(app_link, status_code=302)
+    # Garante que o parâmetro utm_content existe com prefixo para substituição
+    content_raw = query_params.get("utm_content", [""])[0]
+    prefix = "".join(filter(str.isalpha, content_raw)) or "v15n"
 
-    # 4) Caso padrão, dispara evento e vai pro short-link oficial
-    send_fb_event("ViewContent", novo, affiliate_web, request.client.host, ua)
-    return RedirectResponse(affiliate_web, status_code=307)
+    # Incrementa o contador
+    current = r.incr(COUNTER_KEY)
+
+    # Atualiza utm_content com o novo valor
+    query_params["utm_content"] = [f"{prefix}{current}----"]
+
+    # Reconstrói a query string na ordem original
+    updated_query = "&".join([
+        f"{key}={urllib.parse.quote_plus(value[0])}" for key, value in query_params.items()
+    ])
+
+    # Reconstrói a URL final para redirecionar
+    final_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}?{updated_query}"
+
+    return RedirectResponse(final_url, status_code=302)
