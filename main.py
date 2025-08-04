@@ -1,93 +1,103 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-import os, time, json, hashlib, urllib.parse
+import os
+import time
+import json
+import hashlib
 import requests
 import redis
+import urllib.parse
+from fastapi import FastAPI, Query
+from fastapi.responses import HTMLResponse
 
 # ─── CONFIGURAÇÕES SHOPEE ───
-APP_ID     = "18314810331"
-APP_SECRET = "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN"
+APP_ID     = os.getenv("SHOPEE_APP_ID", "18314810331")
+APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
 ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
 
 # ─── REDIS PARA CONTADOR DE UTM ───
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 r = redis.from_url(redis_url)
 COUNTER_KEY = "utm_counter"
 
 app = FastAPI()
 
-
-def generate_short_link(origin_url: str) -> str:
+def generate_short_link(origin_url: str, sub_ids: list) -> str:
     """
-    Encurta a URL via Shopee Affiliate API, usando only originUrl.
+    Gera um shortLink via Shopee Affiliate API com os sub_ids fornecidos.
     """
-    # Monta payload GraphQL
     payload = {
-        "query": f"mutation{{generateShortLink(input:{{originUrl:\"{origin_url}\"}}){{shortLink}}}}"
+        "query": """
+        mutation Generate($url: String!, $subs: [String]) {
+          generateShortLink(input:{originUrl:$url, subIds:$subs}) {
+            shortLink
+          }
+        }
+        """,
+        "variables": {"url": origin_url, "subs": sub_ids}
     }
-    body = json.dumps(payload, separators=(",","":""))
+    body = json.dumps(payload, separators=(",",":"))
 
-    # Cabeçalhos de autenticação
     ts = str(int(time.time()))
     factor = APP_ID + ts + body + APP_SECRET
     signature = hashlib.sha256(factor.encode('utf-8')).hexdigest()
     headers = {
-        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts}, Signature={signature}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts}, Signature={signature}"
     }
 
-    # Requisição
     resp = requests.post(ENDPOINT, headers=headers, data=body)
     if resp.status_code == 200:
-        return resp.json()["data"]["generateShortLink"]["shortLink"]
-    # Fallback para URL original em caso de erro
+        data = resp.json()
+        return data.get("data", {}).get("generateShortLink", {}).get("shortLink") or origin_url
     return origin_url
 
-
 @app.get("/", response_class=HTMLResponse)
-async def landing():
+async def landing(product: str = Query(..., description="URL original do produto Shopee")):
     """
-    Página de entrada com botão "Saiba Mais".
+    Landing page onde o parâmetro `product` é a URL original Shopee.
+    Exemplo: /?product=https%3A%2F%2Fshopee.com.br%2FApple-Iphone-11-128GB...
     """
-    html = """
+    encoded = urllib.parse.quote_plus(product)
+    html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
-    <head><meta charset="UTF-8"><title>Oferta Imperdível</title></head>
+    <head>
+      <meta charset="UTF-8">
+      <title>Oferta Imperdível</title>
+    </head>
     <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
-      <h1>iPhone 11 128GB</h1>
-      <a href="/abrir" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">Saiba Mais</a>
+      <h1>Oferta Shopee</h1>
+      <a href="/abrir?link={encoded}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
+        Saiba Mais
+      </a>
     </body>
     </html>
     """
     return HTMLResponse(content=html)
 
-
 @app.get("/abrir", response_class=HTMLResponse)
-async def abrir():
+async def abrir(link: str = Query(..., description="URL original codificada via quote_plus")):
     """
-    Gera UTM dinâmico e retorna página com botão "Abrir a Shopee".
+    Rota que gera UTM dinâmico, chama Shopee e retorna botão de acesso.
     """
-    # URL base do produto
-    base_url = "https://shopee.com.br/Apple-Iphone-11-128GB-Local-Set-i.52377417.6309028319"
-    # Incrementa contador e cria utm_content
+    origin_url = urllib.parse.unquote_plus(link)
     count = r.incr(COUNTER_KEY)
     utm = f"v15n{count}"
-    # Monta URL final com utm_content
-    parsed = urllib.parse.urlparse(base_url)
-    qs = {"utm_content": utm}
-    final_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(qs)))
 
-    # Chama Shopee para gerar o shortLink
-    short_link = generate_short_link(final_url)
+    # Gera shortLink com a sub-id
+    short_link = generate_short_link(origin_url, [utm])
 
-    # Retorna HTML com botão para abrir o shortLink
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
-    <head><meta charset="UTF-8"><title>Abrir Shopee</title></head>
+    <head>
+      <meta charset="UTF-8">
+      <title>Abrir Shopee</title>
+    </head>
     <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
       <p>Clique no botão abaixo para abrir na Shopee:</p>
-      <a href="{short_link}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">Abrir a Shopee</a>
+      <a href="{short_link}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
+        Abrir a Shopee
+      </a>
     </body>
     </html>
     """
