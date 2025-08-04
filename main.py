@@ -52,7 +52,8 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
 async def redirect_to_shopee(request: Request, product: str = Query(..., description="URL original Shopee (urlencoded)")):
     """
     Decodifica a URL do produto, atualiza/injeta utm_content dinamicamente,
-    encurta via API Shopee e redireciona ao app (mobile) ou web (desktop).
+    encurta via API Shopee e redireciona ao app (mobile) ou web (desktop),
+    com logs do link gerado.
     """
     # Decodifica e parseia a URL original
     decoded = urllib.parse.unquote_plus(product)
@@ -71,8 +72,12 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     new_query = urllib.parse.urlencode(params, doseq=True)
     updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Encurta via API Shopee
+    # Chama a API Shopee para gerar o shortLink
     short_link = generate_short_link(updated_url, [sub_id])
+
+    # Log para debug no Render
+    print(f"[ShopeeRedirect] Updated URL: {updated_url}")
+    print(f"[ShopeeRedirect] Short link: {short_link}")
 
     # Monta Android Intent URI para mobile
     host_path = parsed.netloc + parsed.path
@@ -92,9 +97,9 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     # Mobile: mostra página e dispara o Intent
     html = f"""
     <!DOCTYPE html>
-    <html lang="pt-BR">
+    <html lang=\"pt-BR\">
     <head>
-      <meta charset="UTF-8">
+      <meta charset=\"UTF-8\">
       <title>Redirecionando...</title>
       <style>
         body {{ display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center; }}
@@ -103,7 +108,7 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     </head>
     <body>
       <p>Você está sendo redirecionado para o app da Shopee...</p>
-      <a id="open-btn" href="{intent_link}">Abrir</a>
+      <a id=\"open-btn\" href=\"{intent_link}\">Abrir</a>
       <script>
         window.onload = () => document.getElementById('open-btn').click();
       </script>
