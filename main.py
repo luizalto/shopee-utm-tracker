@@ -75,17 +75,30 @@ async def landing(product: str = Query(..., description="URL original do produto
     return HTMLResponse(content=html)
 
 @app.get("/abrir", response_class=HTMLResponse)
-async def abrir(link: str = Query(..., description="URL original codificada via quote_plus")):
+async def abrir(request: Request):
     """
-    Rota que gera UTM dinâmico, chama Shopee e retorna botão de acesso.
+    Gera UTM dinâmico, chama Shopee e retorna botão "Abrir a Shopee" com deep link para app.
     """
-    origin_url = urllib.parse.unquote_plus(link)
+    # Recupera o link do produto (via query string ou padrão)
+    product_url = request.query_params.get(
+        "product",
+        "https://shopee.com.br/Apple-Iphone-11-128GB-Local-Set-i.52377417.6309028319"
+    )
+    # Gera contador de UTM
     count = r.incr(COUNTER_KEY)
     utm = f"v15n{count}"
+    # Gera shortLink via Shopee API
+    short_link = generate_short_link(product_url, [utm])
 
-    # Gera shortLink com a sub-id
-    short_link = generate_short_link(origin_url, [utm])
+    # Constrói Android intent URI para tentar abrir o app
+    # Remove protocolo para ficar no formato intent://host/path
+    path = urllib.parse.urlparse(product_url).netloc + urllib.parse.urlparse(product_url).path
+    intent_link = (
+        f"intent://{path}#Intent;scheme=https;package=com.shopee.br;"
+        f"S.browser_fallback_url={urllib.parse.quote(short_link, safe='')};end"
+    )
 
+    # HTML com botão que dispara o intent
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -94,10 +107,17 @@ async def abrir(link: str = Query(..., description="URL original codificada via 
       <title>Abrir Shopee</title>
     </head>
     <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
-      <p>Clique no botão abaixo para abrir na Shopee:</p>
-      <a href="{short_link}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
+      <p>Clique no botão abaixo para abrir no app da Shopee:</p>
+      <a id="open-btn" href="{intent_link}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
         Abrir a Shopee
       </a>
+      <script>
+        // Em alguns navegadores in-app, pode ser necessário forçar o Intent
+        document.getElementById('open-btn').addEventListener('click', function(e) {{
+          e.preventDefault();
+          window.location = '{intent_link}';
+        }});
+      </script>
     </body>
     </html>
     """
