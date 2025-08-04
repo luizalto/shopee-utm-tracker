@@ -1,6 +1,5 @@
 fastapi
-uvicorn[standard]
+uvicorn
+redis
 requests
 python-dotenv
-redis
-python-multipart
