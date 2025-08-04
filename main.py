@@ -5,8 +5,8 @@ import hashlib
 import requests
 import redis
 import urllib.parse
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 # ─── CONFIGURAÇÕES SHOPEE ───
 APP_ID     = os.getenv("SHOPEE_APP_ID", "18314810331")
@@ -34,7 +34,7 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
         """,
         "variables": {"url": origin_url, "subs": sub_ids}
     }
-    body = json.dumps(payload, separators=(',', ':'))
+    body = json.dumps(payload, separators=(",", ":"))
     timestamp = str(int(time.time()))
     factor = APP_ID + timestamp + body + APP_SECRET
     signature = hashlib.sha256(factor.encode('utf-8')).hexdigest()
@@ -44,45 +44,52 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
     }
     resp = requests.post(ENDPOINT, headers=headers, data=body)
     if resp.status_code == 200:
-        return resp.json().get("data", {}).get("generateShortLink", {}).get("shortLink") or origin_url
+        data = resp.json()
+        return data.get("data", {}).get("generateShortLink", {}).get("shortLink") or origin_url
     return origin_url
 
 @app.get("/", response_class=HTMLResponse)
-async def redirect_to_shopee(product: str = Query(..., description="URL original Shopee (urlencoded)")):
+async def redirect_to_shopee(request: Request, product: str = Query(..., description="URL original Shopee (urlencoded)")):
     """
     Decodifica a URL do produto, atualiza/injeta utm_content dinamicamente,
-    encurta via API Shopee e redireciona automaticamente ao app.
+    encurta via API Shopee e redireciona ao app (mobile) ou web (desktop).
     """
-    # Decodifica a URL original
+    # Decodifica e parseia a URL original
     decoded = urllib.parse.unquote_plus(product)
     parsed = urllib.parse.urlparse(decoded)
 
-    # Extrai e atualiza parâmetros de query
+    # Parseia query params e remove utm_content se existir
     params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    # Remove qualquer utm_content existente
     params.pop('utm_content', None)
 
     # Gera sub-id incremental
     count = r.incr(COUNTER_KEY)
     sub_id = f"v15n{count}"
-    # Injeta o utm_content novo
     params['utm_content'] = [sub_id]
 
-    # Reconstrói a URL com a nova UTM
+    # Reconstrói URL do produto com UTM atualizado
     new_query = urllib.parse.urlencode(params, doseq=True)
     updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Chama a API Shopee para gerar o shortLink
+    # Encurta via API Shopee
     short_link = generate_short_link(updated_url, [sub_id])
 
-    # Monta Android Intent URI (com fallback para shortLink)
+    # Monta Android Intent URI para mobile
     host_path = parsed.netloc + parsed.path
     intent_link = (
         f"intent://{host_path}#Intent;scheme=https;package=com.shopee.br;"
         f"S.browser_fallback_url={urllib.parse.quote(short_link, safe='')};end"
     )
 
-    # HTML minimalista com click automático
+    # Detecta ambiente (mobile vs desktop)
+    ua = request.headers.get("user-agent", "").lower()
+    is_mobile = any(m in ua for m in ["android", "iphone", "ipad"])
+
+    if not is_mobile:
+        # Desktop: redireciona direto para o link curto no navegador
+        return RedirectResponse(url=short_link)
+
+    # Mobile: mostra página e dispara o Intent
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
