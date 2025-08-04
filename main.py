@@ -1,126 +1,94 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, JSONResponse, PlainTextResponse
-import urllib.parse
-import redis
-import os
-import time
-import json
-import hashlib
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+import os, time, json, hashlib, urllib.parse
 import requests
+import redis
 
-# ─── CONFIGURAÇÕES ────────────────────────────────────
-APP_ID         = "18314810331"
-APP_SECRET     = "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN"
-SHOPEE_API     = "https://open-api.affiliate.shopee.com.br/graphql"
-ACCESS_TOKEN   = os.getenv("IG_ACCESS_TOKEN", "")
-IG_API_URL     = "https://graph.facebook.com/v19.0"
-VERIFY_TOKEN   = os.getenv("IG_VERIFY_TOKEN", "ig-verifica-rasant")
-# ID da sua Página do Facebook conectada à conta Instagram
-PAGE_ID        = os.getenv("FB_PAGE_ID", "<YOUR_FACEBOOK_PAGE_ID>")
-REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379")
-COUNTER_KEY    = "utm_counter"
+# ─── CONFIGURAÇÕES SHOPEE ───
+APP_ID     = "18314810331"
+APP_SECRET = "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN"
+ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
 
-# ─── FASTAPI & REDIS ─────────────────────────────────
+# ─── REDIS PARA CONTADOR DE UTM ───
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+r = redis.from_url(redis_url)
+COUNTER_KEY = "utm_counter"
+
 app = FastAPI()
-r   = redis.Redis.from_url(REDIS_URL)
 
-# ─── UTIL: gera utm_content incremental ───────────────
-def gerar_utm(prefix="v15n"):
-    n = r.incr(COUNTER_KEY)
-    return f"{prefix}{n}----"
 
-# ─── UTIL: gera link curto via Shopee API ────────────
-def generate_short_link(full_url: str) -> str:
+def generate_short_link(origin_url: str) -> str:
+    """
+    Encurta a URL via Shopee Affiliate API, usando only originUrl.
+    """
+    # Monta payload GraphQL
     payload = {
-        "query": (
-            "mutation{generateShortLink(input:{"
-            f"originUrl:\"{full_url}\","
-            "subIds:[\"\",\"\",\"\",\"\",\"\"]"
-            "}){shortLink}}"
-        )
+        "query": f"mutation{{generateShortLink(input:{{originUrl:\"{origin_url}\"}}){{shortLink}}}}"
     }
-    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    ts   = str(int(time.time()))
-    sig  = hashlib.sha256((APP_ID + ts + data + APP_SECRET).encode()).hexdigest()
+    body = json.dumps(payload, separators=(",","":""))
+
+    # Cabeçalhos de autenticação
+    ts = str(int(time.time()))
+    factor = APP_ID + ts + body + APP_SECRET
+    signature = hashlib.sha256(factor.encode('utf-8')).hexdigest()
     headers = {
-        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts}, Signature={sig}",
+        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts}, Signature={signature}",
         "Content-Type": "application/json"
     }
-    resp = requests.post(SHOPEE_API, headers=headers, data=data)
-    if resp.ok:
+
+    # Requisição
+    resp = requests.post(ENDPOINT, headers=headers, data=body)
+    if resp.status_code == 200:
         return resp.json()["data"]["generateShortLink"]["shortLink"]
-    print("❌ Shopee API erro:", resp.status_code, resp.text)
-    return full_url
+    # Fallback para URL original em caso de erro
+    return origin_url
 
-# ─── UTIL: envia DM no Instagram ────────────────────
-def enviar_mensagem_instagram(user_id: str, mensagem: str):
-    url = f"{IG_API_URL}/{PAGE_ID}/messages"
-    payload = {
-        "messaging_product": "instagram",
-        "recipient": {"instagram_id": user_id},
-        "message": {"text": mensagem},
-        "messaging_type": "RESPONSE"
-    }
-    headers = {
-        "Authorization": f"Bearer {ACCESS_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    resp = requests.post(url, headers=headers, json=payload)
-    if not resp.ok:
-        print("❌ Erro Instagram DM:", resp.status_code, resp.text)
 
-# ─── WEBHOOK: Verificação (GET /webhook) ─────────────
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    params    = request.query_params
-    mode      = params.get("hub.mode")
-    token     = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(challenge, status_code=200)
-    return PlainTextResponse("Forbidden", status_code=403)
+@app.get("/", response_class=HTMLResponse)
+async def landing():
+    """
+    Página de entrada com botão "Saiba Mais".
+    """
+    html = """
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head><meta charset="UTF-8"><title>Oferta Imperdível</title></head>
+    <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+      <h1>iPhone 11 128GB</h1>
+      <a href="/abrir" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">Saiba Mais</a>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
-# ─── WEBHOOK: Recebimento de mensagens (POST /webhook) ─
-@app.post("/webhook")
-async def instagram_webhook(request: Request):
-    data = await request.json()
-    try:
-        entry     = data["entry"][0]
-        messaging = entry["messaging"][0]
-        sender_id = messaging["sender"]["id"]
 
-        # Monta seu link base (troque pelo seu produto)
-        base_link = (
-            "https://shopee.com.br/SEU_PRODUTO_AQUI?"
-            "utm_source=an_18314810331&utm_medium=affiliates"
-            "&utm_campaign=id_z91sQ22saU&utm_term=dfhg1iq2f12w"
-            "&utm_content=v15n"
-        )
+@app.get("/abrir", response_class=HTMLResponse)
+async def abrir():
+    """
+    Gera UTM dinâmico e retorna página com botão "Abrir a Shopee".
+    """
+    # URL base do produto
+    base_url = "https://shopee.com.br/Apple-Iphone-11-128GB-Local-Set-i.52377417.6309028319"
+    # Incrementa contador e cria utm_content
+    count = r.incr(COUNTER_KEY)
+    utm = f"v15n{count}"
+    # Monta URL final com utm_content
+    parsed = urllib.parse.urlparse(base_url)
+    qs = {"utm_content": utm}
+    final_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(qs)))
 
-        # Ajusta utm_content dinamicamente
-        parsed    = urllib.parse.urlparse(base_link)
-        params    = urllib.parse.parse_qs(parsed.query)
-        params["utm_content"] = [gerar_utm("v15n")]
-        new_query = urllib.parse.urlencode(params, doseq=True)
-        final_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-        short_link = generate_short_link(final_url)
+    # Chama Shopee para gerar o shortLink
+    short_link = generate_short_link(final_url)
 
-        # Envia DM com link curto
-        enviar_mensagem_instagram(sender_id, f"🔍 Achado: {short_link}")
-        return JSONResponse({"status": "ok"})
-    except Exception as e:
-        print("Erro no webhook:", e)
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-# ─── REDIRECIONAMENTO: cliques em qualquer outro path ─
-@app.get("/{path:path}")
-async def redirect_handler(request: Request, path: str):
-    original = f"https://shopee.com.br/{path}?{request.url.query}"
-    parsed   = urllib.parse.urlparse(original)
-    params   = urllib.parse.parse_qs(parsed.query)
-    prefix   = "".join(filter(str.isalpha, params.get("utm_content", [""])[0])) or "v15n"
-    params["utm_content"] = [gerar_utm(prefix)]
-    new_q    = urllib.parse.urlencode(params, doseq=True)
-    final    = urllib.parse.urlunparse(parsed._replace(query=new_q))
-    short    = generate_short_link(final)
-    return RedirectResponse(short, status_code=302)
+    # Retorna HTML com botão para abrir o shortLink
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head><meta charset="UTF-8"><title>Abrir Shopee</title></head>
+    <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
+      <p>Clique no botão abaixo para abrir na Shopee:</p>
+      <a href="{short_link}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">Abrir a Shopee</a>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
