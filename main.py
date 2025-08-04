@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, PlainTextResponse
 import urllib.parse
 import redis
 import os
@@ -22,6 +22,11 @@ app = FastAPI()
 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
 r = redis.Redis.from_url(redis_url)
 COUNTER_KEY = "utm_counter"
+
+# ─── FUNÇÃO: gerar nova utm_content ───
+def gerar_utm(prefixo="v15n"):
+    current = r.incr(COUNTER_KEY)
+    return f"{prefixo}{current}----"
 
 # ─── FUNÇÃO: gerar link curto na Shopee ───
 def generate_short_link(full_url: str) -> str:
@@ -49,11 +54,6 @@ def generate_short_link(full_url: str) -> str:
     else:
         print(f"❌ Shopee erro: {resp.status_code} - {resp.text}")
         return full_url
-
-# ─── FUNÇÃO: gerar nova utm_content ───
-def gerar_utm(prefixo="v15n"):
-    current = r.incr(COUNTER_KEY)
-    return f"{prefixo}{current}----"
 
 # ─── FUNÇÃO: responder no Instagram ───
 def enviar_mensagem_instagram(user_id: str, mensagem: str):
@@ -104,9 +104,9 @@ async def instagram_webhook(request: Request):
         messaging = entry.get("messaging", [])[0]
         sender_id = messaging["sender"]["id"]
 
-        # Aqui você escolhe o link base da Shopee que quer anunciar:
+        # Link base do produto
         base_link = "https://shopee.com.br/SEU_PRODUTO_AQUI?utm_source=an_18314810331&utm_medium=affiliates&utm_campaign=id_z91sQ22saU&utm_term=dfhg1iq2f12w&utm_content=v15n"
-        
+
         parsed = urllib.parse.urlparse(base_link)
         params = urllib.parse.parse_qs(parsed.query)
         params["utm_content"] = [gerar_utm("v15n")]
@@ -115,15 +115,14 @@ async def instagram_webhook(request: Request):
         link_final = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{nova_query}"
         short_link = generate_short_link(link_final)
 
-        # Envia a resposta automática com o link já encurtado
-        enviar_mensagem_instagram(sender_id, f"Oi! Olha esse achadinho incrível 👇\n{short_link}")
+        enviar_mensagem_instagram(sender_id, f"🔍 Achado do dia:\n{short_link}")
         return JSONResponse({"status": "ok"})
 
     except Exception as e:
         print("Erro no webhook:", str(e))
         return JSONResponse({"error": str(e)}, status_code=400)
 
-# ─── ROTA GET: Verificação do webhook (obrigatório) ───
+# ─── ROTA GET: Verificação do Webhook ───
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -133,5 +132,6 @@ async def verify_webhook(request: Request):
     VERIFY_TOKEN = os.getenv("IG_VERIFY_TOKEN", "meu_token_webhook")
 
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        return int(challenge)
+        return PlainTextResponse(content=challenge, status_code=200)
+
     return JSONResponse(status_code=403, content={"error": "Token inválido"})
