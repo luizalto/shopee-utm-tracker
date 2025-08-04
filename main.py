@@ -22,6 +22,9 @@ SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
 # ─── CONFIGURAÇÕES META ───
 PIXEL_ID          = os.getenv("META_PIXEL_ID")
 ACCESS_TOKEN      = os.getenv("META_ACCESS_TOKEN")
+# Verifica variáveis obrigatórias da Meta
+if not PIXEL_ID or not ACCESS_TOKEN:
+    raise RuntimeError("As variáveis de ambiente META_PIXEL_ID e META_ACCESS_TOKEN devem estar definidas.")
 FB_ENDPOINT       = f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events?access_token={ACCESS_TOKEN}"
 
 # ─── REDIS PARA CONTADOR DE UTM ───
@@ -30,6 +33,7 @@ r                 = redis.from_url(redis_url)
 COUNTER_KEY       = "utm_counter"
 
 app = FastAPI()
+
 
 def generate_short_link(origin_url: str, sub_ids: list) -> str:
     payload = {
@@ -59,6 +63,7 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
         print(f"[ShopeeAPI] Exception generating short link: {e}")
         return origin_url
 
+
 def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_data: dict, custom_data: dict):
     payload = {
         "data": [{
@@ -72,9 +77,13 @@ def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_da
         }]
     }
     try:
-        requests.post(FB_ENDPOINT, json=payload, timeout=5)
+        resp = requests.post(FB_ENDPOINT, json=payload, timeout=5)
+        print(f"[MetaAPI] Status: {resp.status_code}")
+        print(f"[MetaAPI] Response: {resp.text}")
+        resp.raise_for_status()
     except Exception as e:
         print(f"[MetaAPI] Exception sending event: {e}")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded), ou vazio para usar default")):
@@ -125,19 +134,21 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     # Mobile: HTML com click automático
     html = f"""
     <!DOCTYPE html>
-    <html lang="pt-BR">
-      <head><meta charset="UTF-8"><title>Redirecionando...</title></head>
-      <body style="display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center;">
+    <html lang=\"pt-BR\">
+      <head><meta charset=\"UTF-8\"><title>Redirecionando...</title></head>
+      <body style=\"display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center;\">
         <p>Você está sendo redirecionado para o app da Shopee...</p>
-        <a id="open-btn" href="{intent_link}">Abrir</a>
+        <a id=\"open-btn\" href=\"{intent_link}\">Abrir</a>
         <script>window.onload=()=>document.getElementById('open-btn').click();</script>
       </body>
     </html>
     """
     return HTMLResponse(content=html)
 
+
 @app.post("/upload_csv")
-async def upload_csv(file: UploadFile = File(...)):
+async def upload_csv(request: Request, file: UploadFile = File(...)):
+    event_url = str(request.url)
     content = file.file.read().decode('utf-8').splitlines()
     reader = csv.DictReader(content)
     results = []
@@ -147,7 +158,7 @@ async def upload_csv(file: UploadFile = File(...)):
         valor = float(row.get('valor', 0) or 0)
         if vendas > 0:
             user_data = {}
-            custom_data = {"currency": "BRL", "value": valor}
-            send_fb_event("Purchase", utm, "", user_data, custom_data)
+            custom_data = {"currency": "BRL", "value": valor, "num_purchases": vendas}
+            send_fb_event("Purchase", utm, event_url, user_data, custom_data)
             results.append({"utm_content": utm, "status": "sent"})
     return {"processed": results}
