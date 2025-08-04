@@ -10,6 +10,10 @@ import csv
 from fastapi import FastAPI, Request, Query, UploadFile, File
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+# ─── LINK PADRÃO DO PRODUTO SHOPEE ───
+# Cole aqui o link completo do produto Shopee que será usado quando nenhum parâmetro for passado
+DEFAULT_PRODUCT_URL = "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53c5r00o00b3&utm_campaign=id_K6tYTxT2w8&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dfkmaxk3b6rb&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014"
+
 # ─── CONFIGURAÇÕES SHOPEE ───
 APP_ID            = os.getenv("SHOPEE_APP_ID", "18314810331")
 APP_SECRET        = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
@@ -28,11 +32,6 @@ COUNTER_KEY       = "utm_counter"
 app = FastAPI()
 
 def generate_short_link(origin_url: str, sub_ids: list) -> str:
-    """
-    Gera um shortLink via Shopee GraphQL API usando a mutação `generateShortLink`.
-    Usa json=payload e inclui operationName para garantir execução.
-    Faz logs de status e corpo para debug.
-    """
     payload = {
         "operationName": "Generate",
         "query": """
@@ -58,9 +57,7 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
         raise ValueError("shortLink field missing in Shopee response")
     except Exception as e:
         print(f"[ShopeeAPI] Exception generating short link: {e}")
-        # fallback para a URL original
         return origin_url
-
 
 def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_data: dict, custom_data: dict):
     payload = {
@@ -79,11 +76,15 @@ def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_da
     except Exception as e:
         print(f"[MetaAPI] Exception sending event: {e}")
 
-
 @app.get("/", response_class=HTMLResponse)
-async def redirect_to_shopee(request: Request, product: str = Query(..., description="URL original Shopee (URL-encoded)")):
-    # Decodifica produto e parseia URL
-    decoded = urllib.parse.unquote_plus(product)
+async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded), ou vazio para usar default")):
+    # Define URL do produto: parâmetro ou default
+    if product:
+        decoded = urllib.parse.unquote_plus(product)
+    else:
+        decoded = DEFAULT_PRODUCT_URL
+
+    # Parse URL
     parsed = urllib.parse.urlparse(decoded)
 
     # Injeta novo utm_content
@@ -95,14 +96,13 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     new_query = urllib.parse.urlencode(params, doseq=True)
     updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Gera shortLink usando a API da Shopee
+    # Gera shortLink
     short_link = generate_short_link(updated_url, [sub_id])
 
-    # Logs para debug
     print(f"[ShopeeRedirect] Updated URL: {updated_url}")
     print(f"[ShopeeRedirect] Short link: {short_link}")
 
-    # Dispara evento ViewContent ao Meta
+    # Dispara ViewContent
     user_data = {
         "client_ip_address": request.client.host,
         "client_user_agent": request.headers.get("user-agent", "")
@@ -110,7 +110,7 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     custom_data = {"content_ids": [parsed.path.split('/')[-1]], "content_type": "product"}
     send_fb_event("ViewContent", sub_id, updated_url, user_data, custom_data)
 
-    # Decide redirecionamento mobile vs desktop
+    # Detecta mobile vs desktop
     ua = request.headers.get("user-agent", "").lower()
     is_mobile = any(m in ua for m in ["android", "iphone", "ipad"])
     host_path = parsed.netloc + parsed.path
@@ -122,20 +122,19 @@ async def redirect_to_shopee(request: Request, product: str = Query(..., descrip
     if not is_mobile:
         return RedirectResponse(url=short_link)
 
-    # Mobile: HTML com click automático para abrir no app
+    # Mobile: HTML com click automático
     html = f"""
     <!DOCTYPE html>
-    <html lang=\"pt-BR\">
-      <head><meta charset=\"UTF-8\"><title>Redirecionando...</title></head>
-      <body style=\"display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center;\">
+    <html lang="pt-BR">
+      <head><meta charset="UTF-8"><title>Redirecionando...</title></head>
+      <body style="display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center;">
         <p>Você está sendo redirecionado para o app da Shopee...</p>
-        <a id=\"open-btn\" href=\"{intent_link}\">Abrir</a>
+        <a id="open-btn" href="{intent_link}">Abrir</a>
         <script>window.onload=()=>document.getElementById('open-btn').click();</script>
       </body>
     </html>
     """
     return HTMLResponse(content=html)
-
 
 @app.post("/upload_csv")
 async def upload_csv(file: UploadFile = File(...)):
