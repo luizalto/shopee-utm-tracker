@@ -21,6 +21,9 @@ COUNTER_KEY = "utm_counter"
 app = FastAPI()
 
 def generate_short_link(origin_url: str, sub_ids: list) -> str:
+    """
+    Chama a API Shopee para gerar um shortLink com os sub_ids informados.
+    """
     payload = {
         "query": """
         mutation Generate($url: String!, $subs: [String]) {
@@ -45,30 +48,41 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
     return origin_url
 
 @app.get("/", response_class=HTMLResponse)
-async def redirect_to_shopee(product: str = Query(..., description="URL original Shopee (URL-encoded)")):
+async def redirect_to_shopee(product: str = Query(..., description="URL original Shopee (urlencoded)")):
     """
-    Captura o parâmetro `product`, gera UTM incremental, encurta via API Shopee
-    e redireciona automaticamente ao app via Intent.
+    Decodifica a URL do produto, atualiza/injeta utm_content dinamicamente,
+    encurta via API Shopee e redireciona automaticamente ao app.
     """
-    # Decodifica e prepara URL original
-    origin_url = urllib.parse.unquote_plus(product)
+    # Decodifica a URL original
+    decoded = urllib.parse.unquote_plus(product)
+    parsed = urllib.parse.urlparse(decoded)
 
-    # Incrementa contador e monta sub-id
+    # Extrai e atualiza parâmetros de query
+    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    # Remove qualquer utm_content existente
+    params.pop('utm_content', None)
+
+    # Gera sub-id incremental
     count = r.incr(COUNTER_KEY)
     sub_id = f"v15n{count}"
+    # Injeta o utm_content novo
+    params['utm_content'] = [sub_id]
 
-    # Gera shortLink via API
-    short_link = generate_short_link(origin_url, [sub_id])
+    # Reconstrói a URL com a nova UTM
+    new_query = urllib.parse.urlencode(params, doseq=True)
+    updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Monta Android Intent URI
-    parsed = urllib.parse.urlparse(origin_url)
+    # Chama a API Shopee para gerar o shortLink
+    short_link = generate_short_link(updated_url, [sub_id])
+
+    # Monta Android Intent URI (com fallback para shortLink)
     host_path = parsed.netloc + parsed.path
-    intent_uri = (
+    intent_link = (
         f"intent://{host_path}#Intent;scheme=https;package=com.shopee.br;"
         f"S.browser_fallback_url={urllib.parse.quote(short_link, safe='')};end"
     )
 
-    # Página minimalista e click automático
+    # HTML minimalista com click automático
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -76,13 +90,13 @@ async def redirect_to_shopee(product: str = Query(..., description="URL original
       <meta charset="UTF-8">
       <title>Redirecionando...</title>
       <style>
-        body {{ display:flex;justify-content:center;align-items:center;height:100vh;margin:0;font-size:20px;text-align:center; }}
-        #open-btn {{display:none;}}
+        body {{ display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center; }}
+        #open-btn {{ display:none; }}
       </style>
     </head>
     <body>
       <p>Você está sendo redirecionado para o app da Shopee...</p>
-      <a id="open-btn" href="{intent_uri}">Abrir</a>
+      <a id="open-btn" href="{intent_link}">Abrir</a>
       <script>
         window.onload = () => document.getElementById('open-btn').click();
       </script>
