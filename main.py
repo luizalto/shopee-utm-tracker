@@ -1,10 +1,10 @@
 import os
 import time
-import json
 import hashlib
 import requests
 import urllib.parse
 import csv
+import redis
 from fastapi import FastAPI, Request, Query, UploadFile, File
 from fastapi.responses import RedirectResponse
 
@@ -30,35 +30,21 @@ SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3Z
 SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
 
 VIDEO_ID     = os.getenv("VIDEO_ID", "v15")
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-COUNTER_FILE = os.path.join(BASE_DIR, "utm_counter.json")
+REDIS_URL    = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+COUNTER_KEY  = os.getenv("UTM_COUNTER_KEY", "utm_counter")
+
+# Conecta ao Redis para contador de UTM
+r = redis.from_url(REDIS_URL)
 
 app = FastAPI()
 
-# ─── CONTADOR DE UTM (arquivo) ────────────────────────────────────────────────
-def load_count():
-    if os.path.exists(COUNTER_FILE):
-        try:
-            with open(COUNTER_FILE, 'r') as f:
-                data = json.load(f)
-                return int(data.get('count', 0))
-        except Exception:
-            return 0
-    return 0
-
-
-def save_count(n: int):
-    with open(COUNTER_FILE, 'w') as f:
-        json.dump({'count': n}, f)
-
-
+# ─── GERAÇÃO DE UTM COM REDIS ─────────────────────────────────────────────────
 def next_utm() -> str:
-    count = load_count() + 1
-    save_count(count)
-    print(f"Gerando UTM: {VIDEO_ID}n{count} (contador anterior: {count - 1})")
+    count = r.incr(COUNTER_KEY)
+    print(f"Gerando UTM: {VIDEO_ID}n{count}")
     return f"{VIDEO_ID}n{count}"
 
-
+# ─── ENVIO DE EVENTOS AO META PIXEL ─────────────────────────────────────────────
 def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_data: dict, custom_data: dict):
     payload = {"data": [{
         "event_name": event_name,
@@ -75,17 +61,13 @@ def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_da
     except Exception as e:
         print(f"[MetaAPI] Exception sending event: {e}")
 
-
+# ─── GERAÇÃO DE SHORT LINK DA SHOPEE ────────────────────────────────────────────
 def generate_short_link(full_url: str, utm_content: str) -> str:
-    """
-    Gera um short link oficial da Shopee para a URL completa informada,
-    usando o utm_content já gerado.
-    """
     payload_obj = {
         "query": (
             "mutation{generateShortLink(input:{"
             f"originUrl:\"{full_url}\","
-            f"subIds:[\"\",\"\",\"{utm_content}\",\"\",\"\"]"  # utm_content posicionado
+            f"subIds:[\"\",\"\",\"{utm_content}\",\"\",\"\"]"  # utm_content embutido
             "}){shortLink}}"
         )
     }
@@ -109,9 +91,10 @@ def generate_short_link(full_url: str, utm_content: str) -> str:
     print(f"[ShopeeShortLink] Gerado ({utm_content}): {link}")
     return link
 
+# ─── ENDPOINT PRINCIPAL ────────────────────────────────────────────────────────
 @app.get("/", response_class=RedirectResponse)
 async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded) ou vazio para usar DEFAULT_PRODUCT_URL")):
-    # Obtém URL de produto (parâmetro ou default)
+    # Define URL do produto
     url_in = urllib.parse.unquote_plus(product) if product else DEFAULT_PRODUCT_URL
 
     # Gera UTM e envia evento ViewContent
@@ -126,7 +109,7 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     }
     send_fb_event("ViewContent", utm_value, url_in, user_data, custom_data)
 
-    # Gera short link da Shopee
+    # Gera e redireciona para o short link
     try:
         short_link = generate_short_link(url_in, utm_value)
     except Exception as e:
@@ -135,6 +118,7 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
 
     return RedirectResponse(url=short_link, status_code=302)
 
+# ─── ENDPOINT DE UPLOAD CSV ───────────────────────────────────────────────────
 @app.post("/upload_csv")
 async def upload_csv(request: Request, file: UploadFile = File(...)):
     event_url = str(request.url)
