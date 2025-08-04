@@ -5,7 +5,7 @@ import hashlib
 import requests
 import redis
 import urllib.parse
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse
 
 # ─── CONFIGURAÇÕES SHOPEE ───
@@ -51,22 +51,22 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
     return origin_url
 
 @app.get("/", response_class=HTMLResponse)
-async def landing(product: str = Query(..., description="URL original do produto Shopee")):
+async def landing(product: str = Query(..., description="URL original do produto Shopee (URL encoded)!")):
     """
-    Landing page onde o parâmetro `product` é a URL original Shopee.
-    Exemplo: /?product=https%3A%2F%2Fshopee.com.br%2FApple-Iphone-11-128GB...
+    Landing page onde o parâmetro `product` é a URL original Shopee (encoded).
+    Exemplo: /?product=https%3A%2F%2Fshopee.com.br%2Fproduct%2F123
     """
-    encoded = urllib.parse.quote_plus(product)
+    # Botão 'Saiba Mais' redireciona para /abrir com o mesmo link
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
     <head>
       <meta charset="UTF-8">
-      <title>Oferta Imperdível</title>
+      <title>Oferta Shopee</title>
     </head>
     <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;">
       <h1>Oferta Shopee</h1>
-      <a href="/abrir?link={encoded}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
+      <a href="/abrir?link={product}" style="padding:15px 30px;background:#0049A9;color:#fff;text-decoration:none;border-radius:4px;font-size:18px;">
         Saiba Mais
       </a>
     </body>
@@ -75,30 +75,28 @@ async def landing(product: str = Query(..., description="URL original do produto
     return HTMLResponse(content=html)
 
 @app.get("/abrir", response_class=HTMLResponse)
-async def abrir(request: Request):
+async def abrir(request: Request, link: str = Query(None, description="URL original codificada via quote_plus")):
     """
-    Gera UTM dinâmico, chama Shopee e retorna botão "Abrir a Shopee" com deep link para app.
+    Gera UTM dinâmico, chama API Shopee e retorna botão "Abrir a Shopee" com Intent.
     """
-    # Recupera o link do produto (via query string ou padrão)
-    product_url = request.query_params.get(
-        "product",
+    # Decodifica link ou usa padrão
+    origin_url = urllib.parse.unquote_plus(link) if link else \
         "https://shopee.com.br/Apple-Iphone-11-128GB-Local-Set-i.52377417.6309028319"
-    )
-    # Gera contador de UTM
+
     count = r.incr(COUNTER_KEY)
     utm = f"v15n{count}"
-    # Gera shortLink via Shopee API
-    short_link = generate_short_link(product_url, [utm])
 
-    # Constrói Android intent URI para tentar abrir o app
-    # Remove protocolo para ficar no formato intent://host/path
-    path = urllib.parse.urlparse(product_url).netloc + urllib.parse.urlparse(product_url).path
+    # Gera shortLink com a sub-id
+    short_link = generate_short_link(origin_url, [utm])
+
+    # Constrói Android intent URI para o app Shopee
+    parsed = urllib.parse.urlparse(origin_url)
+    host_path = parsed.netloc + parsed.path
     intent_link = (
-        f"intent://{path}#Intent;scheme=https;package=com.shopee.br;"
+        f"intent://{host_path}#Intent;scheme=https;package=com.shopee.br;"
         f"S.browser_fallback_url={urllib.parse.quote(short_link, safe='')};end"
     )
 
-    # HTML com botão que dispara o intent
     html = f"""
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -112,7 +110,6 @@ async def abrir(request: Request):
         Abrir a Shopee
       </a>
       <script>
-        // Em alguns navegadores in-app, pode ser necessário forçar o Intent
         document.getElementById('open-btn').addEventListener('click', function(e) {{
           e.preventDefault();
           window.location = '{intent_link}';
