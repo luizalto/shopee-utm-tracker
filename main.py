@@ -8,29 +8,28 @@ import json
 import hashlib
 import requests
 
-# ─── CONFIGURAÇÕES ───
-APP_ID     = "18314810331"
-APP_SECRET = "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN"
-SHOPEE_ENDPOINT = "https://open-api.affiliate.shopee.com.br/graphql"
-ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "SEU_TOKEN_DE_ACESSO_INSTAGRAM")
-IG_API_URL = "https://graph.facebook.com/v19.0"
+# ─── CONFIGURAÇÕES ────────────────────────────────────
+APP_ID         = "18314810331"
+APP_SECRET     = "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN"
+SHOPEE_API     = "https://open-api.affiliate.shopee.com.br/graphql"
+ACCESS_TOKEN   = os.getenv("IG_ACCESS_TOKEN", "")
+IG_API_URL     = "https://graph.facebook.com/v19.0"
+VERIFY_TOKEN   = os.getenv("IG_VERIFY_TOKEN", "ig-verifica-rasant")
+REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379")
+COUNTER_KEY    = "utm_counter"
 
-# ─── FASTAPI ───
+# ─── FASTAPI & REDIS ─────────────────────────────────
 app = FastAPI()
+r   = redis.Redis.from_url(REDIS_URL)
 
-# ─── REDIS ───
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-r = redis.Redis.from_url(redis_url)
-COUNTER_KEY = "utm_counter"
+# ─── UTIL: gera utm_content incremental ───────────────
+def gerar_utm(prefix="v15n"):
+    n = r.incr(COUNTER_KEY)
+    return f"{prefix}{n}----"
 
-# ─── FUNÇÃO: gerar nova utm_content ───
-def gerar_utm(prefixo="v15n"):
-    current = r.incr(COUNTER_KEY)
-    return f"{prefixo}{current}----"
-
-# ─── FUNÇÃO: gerar link curto na Shopee ───
+# ─── UTIL: gera link curto via Shopee API ────────────
 def generate_short_link(full_url: str) -> str:
-    payload_obj = {
+    payload = {
         "query": (
             "mutation{generateShortLink(input:{"
             f"originUrl:\"{full_url}\","
@@ -38,24 +37,20 @@ def generate_short_link(full_url: str) -> str:
             "}){shortLink}}"
         )
     }
-    payload = json.dumps(payload_obj, separators=(',', ':'), ensure_ascii=False)
-    timestamp = str(int(time.time()))
-    base_str = APP_ID + timestamp + payload + APP_SECRET
-    signature = hashlib.sha256(base_str.encode('utf-8')).hexdigest()
-
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    ts   = str(int(time.time()))
+    sig  = hashlib.sha256((APP_ID + ts + data + APP_SECRET).encode()).hexdigest()
     headers = {
-        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={timestamp}, Signature={signature}",
+        "Authorization": f"SHA256 Credential={APP_ID}, Timestamp={ts}, Signature={sig}",
         "Content-Type": "application/json"
     }
+    resp = requests.post(SHOPEE_API, headers=headers, data=data)
+    if resp.ok:
+        return resp.json()["data"]["generateShortLink"]["shortLink"]
+    print("❌ Shopee API erro:", resp.status_code, resp.text)
+    return full_url
 
-    resp = requests.post(SHOPEE_ENDPOINT, headers=headers, data=payload)
-    if resp.status_code == 200:
-        return resp.json()['data']['generateShortLink']['shortLink']
-    else:
-        print(f"❌ Shopee erro: {resp.status_code} - {resp.text}")
-        return full_url
-
-# ─── FUNÇÃO: responder no Instagram ───
+# ─── UTIL: envia DM no Instagram ────────────────────
 def enviar_mensagem_instagram(user_id: str, mensagem: str):
     url = f"{IG_API_URL}/{user_id}/messages"
     payload = {
@@ -67,71 +62,62 @@ def enviar_mensagem_instagram(user_id: str, mensagem: str):
         "Authorization": f"Bearer {ACCESS_TOKEN}",
         "Content-Type": "application/json"
     }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code != 200:
-        print("❌ Erro ao enviar mensagem:", response.text)
+    resp = requests.post(url, headers=headers, json=payload)
+    if not resp.ok:
+        print("❌ Erro Instagram DM:", resp.status_code, resp.text)
 
-# ─── ROTA GET: Redirecionamento padrão ───
-@app.get("/{path:path}")
-async def redirect_handler(request: Request, path: str):
-    original_query = str(request.url.query)
-    original_link = f"https://shopee.com.br/{path}?{original_query}"
+# ─── WEBHOOK: Verificação (GET /webhook) ─────────────
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    params    = request.query_params
+    mode      = params.get("hub.mode")
+    token     = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return PlainTextResponse(challenge, status_code=200)
+    return PlainTextResponse("Forbidden", status_code=403)
 
-    parsed_url = urllib.parse.urlparse(original_link)
-    query_params = urllib.parse.parse_qs(parsed_url.query)
-
-    content_raw = query_params.get("utm_content", [""])[0]
-    prefix = "".join(filter(str.isalpha, content_raw)) or "v15n"
-
-    utm = gerar_utm(prefix)
-    query_params["utm_content"] = [utm]
-
-    updated_query = "&".join([
-        f"{key}={urllib.parse.quote_plus(value[0])}" for key, value in query_params.items()
-    ])
-    final_url = f"https://shopee.com.br/{path}?{updated_query}"
-    short_link = generate_short_link(final_url)
-
-    return RedirectResponse(short_link, status_code=302)
-
-# ─── ROTA POST: Webhook Instagram ───
+# ─── WEBHOOK: Recebimento de mensagens (POST /webhook) ─
 @app.post("/webhook")
 async def instagram_webhook(request: Request):
     data = await request.json()
-
     try:
-        entry = data.get("entry", [])[0]
-        messaging = entry.get("messaging", [])[0]
+        entry     = data["entry"][0]
+        messaging = entry["messaging"][0]
         sender_id = messaging["sender"]["id"]
 
-        # Link base do produto
-        base_link = "https://shopee.com.br/SEU_PRODUTO_AQUI?utm_source=an_18314810331&utm_medium=affiliates&utm_campaign=id_z91sQ22saU&utm_term=dfhg1iq2f12w&utm_content=v15n"
+        # Monta seu link base (troque pelo seu produto)
+        base_link = (
+            "https://shopee.com.br/SEU_PRODUTO_AQUI?"
+            "utm_source=an_18314810331&utm_medium=affiliates"
+            "&utm_campaign=id_z91sQ22saU&utm_term=dfhg1iq2f12w"
+            "&utm_content=v15n"
+        )
 
+        # Ajusta utm_content dinamicamente
         parsed = urllib.parse.urlparse(base_link)
         params = urllib.parse.parse_qs(parsed.query)
         params["utm_content"] = [gerar_utm("v15n")]
+        new_query  = urllib.parse.urlencode(params, doseq=True)
+        final_url  = urllib.parse.urlunparse(parsed._replace(query=new_query))
+        short_link = generate_short_link(final_url)
 
-        nova_query = "&".join([f"{k}={v[0]}" for k, v in params.items()])
-        link_final = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{nova_query}"
-        short_link = generate_short_link(link_final)
-
-        enviar_mensagem_instagram(sender_id, f"🔍 Achado do dia:\n{short_link}")
+        # Envia DM com link curto
+        enviar_mensagem_instagram(sender_id, f"🔍 Achado: {short_link}")
         return JSONResponse({"status": "ok"})
-
     except Exception as e:
-        print("Erro no webhook:", str(e))
+        print("Erro no webhook:", e)
         return JSONResponse({"error": str(e)}, status_code=400)
 
-# ─── ROTA GET: Verificação do Webhook ───
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-
-    VERIFY_TOKEN = os.getenv("IG_VERIFY_TOKEN", "meu_token_webhook")
-
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(content=challenge, status_code=200)
-
-    return JSONResponse(status_code=403, content={"error": "Token inválido"})
+# ─── REDIRECIONAMENTO: cliques em qualquer outro path ─
+@app.get("/{path:path}")
+async def redirect_handler(request: Request, path: str):
+    original = f"https://shopee.com.br/{path}?{request.url.query}"
+    parsed   = urllib.parse.urlparse(original)
+    params   = urllib.parse.parse_qs(parsed.query)
+    prefix   = "".join(filter(str.isalpha, params.get("utm_content", [""])[0])) or "v15n"
+    params["utm_content"] = [gerar_utm(prefix)]
+    new_q    = urllib.parse.urlencode(params, doseq=True)
+    final    = urllib.parse.urlunparse(parsed._replace(query=new_q))
+    short    = generate_short_link(final)
+    return RedirectResponse(short, status_code=302)
