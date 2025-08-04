@@ -15,6 +15,8 @@ SHOPEE_API     = "https://open-api.affiliate.shopee.com.br/graphql"
 ACCESS_TOKEN   = os.getenv("IG_ACCESS_TOKEN", "")
 IG_API_URL     = "https://graph.facebook.com/v19.0"
 VERIFY_TOKEN   = os.getenv("IG_VERIFY_TOKEN", "ig-verifica-rasant")
+# ID da sua Página do Facebook conectada à conta Instagram
+PAGE_ID        = os.getenv("FB_PAGE_ID", "<YOUR_FACEBOOK_PAGE_ID>")
 REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379")
 COUNTER_KEY    = "utm_counter"
 
@@ -52,11 +54,12 @@ def generate_short_link(full_url: str) -> str:
 
 # ─── UTIL: envia DM no Instagram ────────────────────
 def enviar_mensagem_instagram(user_id: str, mensagem: str):
-    url = f"{IG_API_URL}/{user_id}/messages"
+    url = f"{IG_API_URL}/{PAGE_ID}/messages"
     payload = {
         "messaging_product": "instagram",
-        "recipient": {"id": user_id},
-        "message": {"text": mensagem}
+        "recipient": {"instagram_id": user_id},
+        "message": {"text": mensagem},
+        "messaging_type": "RESPONSE"
     }
     headers = {
         "Authorization": f"Bearer {ACCESS_TOKEN}",
@@ -95,11 +98,11 @@ async def instagram_webhook(request: Request):
         )
 
         # Ajusta utm_content dinamicamente
-        parsed = urllib.parse.urlparse(base_link)
-        params = urllib.parse.parse_qs(parsed.query)
+        parsed    = urllib.parse.urlparse(base_link)
+        params    = urllib.parse.parse_qs(parsed.query)
         params["utm_content"] = [gerar_utm("v15n")]
-        new_query  = urllib.parse.urlencode(params, doseq=True)
-        final_url  = urllib.parse.urlunparse(parsed._replace(query=new_query))
+        new_query = urllib.parse.urlencode(params, doseq=True)
+        final_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
         short_link = generate_short_link(final_url)
 
         # Envia DM com link curto
