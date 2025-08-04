@@ -4,12 +4,19 @@ import requests
 import redis
 import urllib.parse
 import csv
+import hashlib
+import json
 from fastapi import FastAPI, Request, Query, UploadFile, File
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import RedirectResponse
 
 # ─── LINK PADRÃO DO PRODUTO SHOPEE ───
 # Cole aqui o link completo do produto Shopee que será usado quando nenhum parâmetro for passado
-DEFAULT_PRODUCT_URL = "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53c5r00o00b3&utm_campaign=id_K6tYTxT2w8&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dfkmaxk3b6rb&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014"
+default_url = os.getenv("DEFAULT_PRODUCT_URL") or (
+    "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-"
+    "Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031."
+    "25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53c5r00o00b3&"
+    "utm_campaign=id_K6tYTxT2w8&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dfkmaxk3b6rb"
+)
 
 # ─── CONFIGURAÇÕES META (Facebook Conversions) ───
 PIXEL_ID     = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID")
@@ -25,6 +32,11 @@ redis_url   = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 r           = redis.from_url(redis_url)
 COUNTER_KEY = "utm_counter"
 
+# ─── CONFIGURAÇÕES SHOPEE SHORT LINK ───
+SHOPEE_APP_ID     = os.getenv("SHOPEE_APP_ID", "18314810331")
+SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
+SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
+
 app = FastAPI()
 
 def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_data: dict, custom_data: dict):
@@ -39,30 +51,53 @@ def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_da
     }]}
     try:
         resp = requests.post(FB_ENDPOINT, json=payload, timeout=5)
-        print(f"[MetaAPI] Status: {resp.status_code}")
-        print(f"[MetaAPI] Response: {resp.text}")
         resp.raise_for_status()
     except Exception as e:
         print(f"[MetaAPI] Exception sending event: {e}")
 
-@app.get("/", response_class=HTMLResponse)
-async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded), ou vazio para usar default")):
-    # Define URL do produto: parâmetro ou default
-    url_in = urllib.parse.unquote_plus(product) if product else DEFAULT_PRODUCT_URL
+def generate_short_link(full_url: str) -> str:
+    """
+    Gera um short link oficial da Shopee para a URL completa informada.
+    """
+    query = (
+        "mutation{generateShortLink(input:{"
+        f"originUrl:\"{full_url}\","
+        "subIds:[\"\",\"\",\"\",\"\",\"\"]"  # utm_content já embutido na URL
+        "}){shortLink}}"
+    )
+    payload_obj = {"query": query}
+    payload = json.dumps(payload_obj, separators=(',', ':'), ensure_ascii=False)
+
+    timestamp = str(int(time.time()))
+    base_str  = SHOPEE_APP_ID + timestamp + payload + SHOPEE_APP_SECRET
+    signature = hashlib.sha256(base_str.encode('utf-8')).hexdigest()
+
+    headers = {
+        "Authorization": f"SHA256 Credential={SHOPEE_APP_ID}, Timestamp={timestamp}, Signature={signature}",
+        "Content-Type": "application/json"
+    }
+
+    resp = requests.post(SHOPEE_ENDPOINT, headers=headers, data=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    return data['data']['generateShortLink']['shortLink']
+
+@app.get("/", response_class=RedirectResponse)
+async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded) ou vazio para usar default")):
+    # Define URL do produto (param ou default)
+    url_in = urllib.parse.unquote_plus(product) if product else default_url
     parsed = urllib.parse.urlparse(url_in)
 
-    # Injeta novo utm_content em raw query
-    segments = (parsed.query or "").split('&') if parsed.query else []
-    # Remove utm_content existente
+    # Parseia e reconstroi query sem utm_content
+    segments = parsed.query.split('&') if parsed.query else []
     segments = [seg for seg in segments if not seg.startswith('utm_content=')]
 
-    # Incrementa contador e define utm_value
+    # Incrementa contador e define novo utm_content
     count = r.incr(COUNTER_KEY)
-    sub_id = f"v15n{count}"
-    utm_value = sub_id
+    utm_value = f"v15n{count}"
     new_seg = f"utm_content={utm_value}"
 
-    # Insere após utm_campaign ou no fim
+    # Insere utm_content após utm_campaign ou no fim
     new_segments = []
     inserted = False
     for seg in segments:
@@ -73,42 +108,28 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     if not inserted:
         new_segments.append(new_seg)
 
-    new_query = '&'.join(new_segments)
-    updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-    print(f"[ShopeeRedirect] Updated URL: {updated_url}")
+    # Monta URL com UTM atualizado
+    updated_query = '&'.join(new_segments)
+    updated_url = urllib.parse.urlunparse(parsed._replace(query=updated_query))
+    print(f"[ShopeeRedirect] URL longa com UTM: {updated_url}")
 
-    # Dispara ViewContent
+    # Dispara evento ViewContent
     user_data = {
         "client_ip_address": request.client.host,
         "client_user_agent": request.headers.get("user-agent", "")
     }
     custom_data = {"content_ids": [parsed.path.split('/')[-1]], "content_type": "product"}
-    send_fb_event("ViewContent", sub_id, updated_url, user_data, custom_data)
+    send_fb_event("ViewContent", utm_value, updated_url, user_data, custom_data)
 
-    # Detecta mobile vs desktop
-    ua = request.headers.get("user-agent", "").lower()
-    is_mobile = any(m in ua for m in ["android", "iphone", "ipad"])
-    if not is_mobile:
-        return RedirectResponse(url=updated_url)
+    # Gera e redireciona para o short link oficial da Shopee
+    try:
+        short_link = generate_short_link(updated_url)
+        print(f"[ShopeeShortLink] Gerado: {short_link}")
+    except Exception as e:
+        print(f"[ShopeeShortLink] Falha: {e}")
+        short_link = updated_url
 
-    # Deep-link para mobile
-    host_path = parsed.netloc + parsed.path
-    intent_link = (
-        f"intent://{host_path}#Intent;scheme=https;package=com.shopee.br;"
-        f"S.browser_fallback_url={urllib.parse.quote(updated_url, safe='')};end"
-    )
-    html = f"""
-    <!DOCTYPE html>
-    <html lang=\"pt-BR\">
-      <head><meta charset=\"UTF-8\"><title>Redirecionando...</title></head>
-      <body style=\"display:flex;justify-content:center;align-items:center;flex-direction:column;height:100vh;margin:0;font-size:20px;text-align:center;\">
-        <p>Você está sendo redirecionado para o app da Shopee...</p>
-        <a id=\"open-btn\" href=\"{intent_link}\">Abrir</a>
-        <script>window.onload=()=>document.getElementById('open-btn').click();</script>
-      </body>
-    </html>
-    """
-    return HTMLResponse(content=html)
+    return RedirectResponse(url=short_link, status_code=302)
 
 @app.post("/upload_csv")
 async def upload_csv(request: Request, file: UploadFile = File(...)):
@@ -121,6 +142,6 @@ async def upload_csv(request: Request, file: UploadFile = File(...)):
         vendas = int(row.get('vendas', 0) or 0)
         valor = float(row.get('valor', 0) or 0)
         if vendas > 0:
-            send_fb_event("Purchase", utm, event_url, {}, {"currency":"BRL","value":valor,"num_purchases":vendas})
+            send_fb_event("Purchase", utm, event_url, {}, {"currency": "BRL", "value": valor, "num_purchases": vendas})
             results.append({"utm_content": utm, "status": "sent"})
     return {"processed": results}
