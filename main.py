@@ -19,18 +19,20 @@ APP_ID            = os.getenv("SHOPEE_APP_ID", "18314810331")
 APP_SECRET        = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
 SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
 
-# ─── CONFIGURAÇÕES META ───
-PIXEL_ID          = os.getenv("META_PIXEL_ID")
-ACCESS_TOKEN      = os.getenv("META_ACCESS_TOKEN")
-# Verifica variáveis obrigatórias da Meta
+# ─── CONFIGURAÇÕES META (Facebook Conversions) ───
+# Agora usa as variáveis definidas no Render: FB_PIXEL_ID e FB_ACCESS_TOKEN
+PIXEL_ID      = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID")
+ACCESS_TOKEN  = os.getenv("FB_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
 if not PIXEL_ID or not ACCESS_TOKEN:
-    raise RuntimeError("As variáveis de ambiente META_PIXEL_ID e META_ACCESS_TOKEN devem estar definidas.")
-FB_ENDPOINT       = f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events?access_token={ACCESS_TOKEN}"
+    raise RuntimeError(
+        "As variáveis de ambiente FB_PIXEL_ID e FB_ACCESS_TOKEN (ou META_PIXEL_ID e META_ACCESS_TOKEN) devem estar definidas."
+    )
+FB_ENDPOINT   = f"https://graph.facebook.com/v14.0/{PIXEL_ID}/events?access_token={ACCESS_TOKEN}"
 
 # ─── REDIS PARA CONTADOR DE UTM ───
-redis_url         = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-r                 = redis.from_url(redis_url)
-COUNTER_KEY       = "utm_counter"
+redis_url   = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+r           = redis.from_url(redis_url)
+COUNTER_KEY = "utm_counter"
 
 app = FastAPI()
 
@@ -48,7 +50,12 @@ def generate_short_link(origin_url: str, sub_ids: list) -> str:
         "variables": {"url": origin_url, "subs": sub_ids}
     }
     try:
-        resp = requests.post(SHOPEE_ENDPOINT, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(
+            SHOPEE_ENDPOINT,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
         print(f"[ShopeeAPI] Status: {resp.status_code}")
         print(f"[ShopeeAPI] Response: {resp.text}")
         resp.raise_for_status()
@@ -87,16 +94,13 @@ def send_fb_event(event_name: str, event_id: str, event_source_url: str, user_da
 
 @app.get("/", response_class=HTMLResponse)
 async def redirect_to_shopee(request: Request, product: str = Query(None, description="URL original Shopee (URL-encoded), ou vazio para usar default")):
-    # Define URL do produto: parâmetro ou default
     if product:
         decoded = urllib.parse.unquote_plus(product)
     else:
         decoded = DEFAULT_PRODUCT_URL
 
-    # Parse URL
     parsed = urllib.parse.urlparse(decoded)
 
-    # Injeta novo utm_content
     params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
     params.pop('utm_content', None)
     count = r.incr(COUNTER_KEY)
@@ -105,13 +109,11 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     new_query = urllib.parse.urlencode(params, doseq=True)
     updated_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    # Gera shortLink
     short_link = generate_short_link(updated_url, [sub_id])
 
     print(f"[ShopeeRedirect] Updated URL: {updated_url}")
     print(f"[ShopeeRedirect] Short link: {short_link}")
 
-    # Dispara ViewContent
     user_data = {
         "client_ip_address": request.client.host,
         "client_user_agent": request.headers.get("user-agent", "")
@@ -119,7 +121,6 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     custom_data = {"content_ids": [parsed.path.split('/')[-1]], "content_type": "product"}
     send_fb_event("ViewContent", sub_id, updated_url, user_data, custom_data)
 
-    # Detecta mobile vs desktop
     ua = request.headers.get("user-agent", "").lower()
     is_mobile = any(m in ua for m in ["android", "iphone", "ipad"])
     host_path = parsed.netloc + parsed.path
@@ -131,7 +132,6 @@ async def redirect_to_shopee(request: Request, product: str = Query(None, descri
     if not is_mobile:
         return RedirectResponse(url=short_link)
 
-    # Mobile: HTML com click automático
     html = f"""
     <!DOCTYPE html>
     <html lang=\"pt-BR\">
