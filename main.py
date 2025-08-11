@@ -13,7 +13,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 # ───────────────────────────── CONFIG ─────────────────────────────
 
-DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53e5jsed00e8&utm_campaign=id_VNKoDZgg4n&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dgxt1amdb9gj&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014")
+DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/")
 
 FB_PIXEL_ID     = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID")
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
@@ -22,6 +22,7 @@ if not FB_PIXEL_ID or not FB_ACCESS_TOKEN:
 
 FB_ENDPOINT = f"https://graph.facebook.com/v14.0/{FB_PIXEL_ID}/events?access_token={FB_ACCESS_TOKEN}"
 
+# (exemplos padrão que você usa)
 SHOPEE_APP_ID     = os.getenv("SHOPEE_APP_ID", "18314810331")
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
 SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
@@ -34,7 +35,7 @@ COUNTER_KEY  = os.getenv("UTM_COUNTER_KEY", "utm_counter")
 USERDATA_TTL_SECONDS = int(os.getenv("USERDATA_TTL_SECONDS", "604800"))
 USERDATA_KEY_PREFIX  = os.getenv("USERDATA_KEY_PREFIX", "ud:")
 
-# Janela máxima que você pretende enviar compras atrasadas (7 dias)
+# Janela máxima para compras atrasadas (7 dias)
 MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", str(7 * 24 * 60 * 60)))
 
 # ───────────────────────────── APP / REDIS ─────────────────────────────
@@ -220,9 +221,10 @@ def redirect_to_shopee(
     # 5) Envia VC com event_time = vc_time
     custom_data_vc = {"content_type": "product"}
     try:
-        send_fb_event("ViewContent", utm_value, link, user_data_vc, custom_data_vc, vc_time)
+        capi_vc_resp = send_fb_event("ViewContent", utm_value, link, user_data_vc, custom_data_vc, vc_time)
     except Exception as e:
         print(f"[CAPI VC] erro: {e}")
+        capi_vc_resp = {"error": str(e)}
 
     # 6) Salva no Redis para reutilizar no Purchase (inclui vc_time)
     save_user_data(utm_value, {
@@ -235,9 +237,21 @@ def redirect_to_shopee(
     try:
         short_link = generate_short_link(link, utm_value)
         dest = short_link
+        print("[VC] short_link_ok utm=", utm_value, " | dest=", dest)
     except Exception as e:
         print(f"[ShopeeShortLink] Falha: {e}. Fallback para URL original.")
         dest = replace_utm_content_only(link, utm_value)
+        print("[VC] short_link_fallback utm=", utm_value, " | dest=", dest)
+
+    # LOG: clique + VC
+    print("[VC] utm=", utm_value,
+          "| vc_time=", vc_time,
+          "| fbc=", fbc_val,
+          "| fbp=", fbp_cookie,
+          "| ip=", ip_addr,
+          "| ua=", (user_agent[:120] + "..." if len(user_agent) > 120 else user_agent),
+          "| link=", link,
+          "| capi_resp=", capi_vc_resp)
 
     # 8) Redireciona
     return RedirectResponse(dest, status_code=302)
@@ -249,6 +263,7 @@ async def upload_csv(file: UploadFile = File(...)):
       - utm_content (ou: utm, sub_id3, subid3, sub_id_3)  [obrigatória]
       - value        (ou: valor, price, amount)            [opcional]
       - num_purchases(ou: vendas, quantity, qty, purchases)[opcional]
+
     NÃO lê tempo do CSV: usa o vc_time salvo no Redis (do ViewContent) como event_time do Purchase.
     """
     content = await file.read()
@@ -286,6 +301,7 @@ async def upload_csv(file: UploadFile = File(...)):
         cache = load_user_data(utm)
         if not cache or not cache.get("user_data"):
             processed.append({"utm_content": raw_utm, "utm_norm": utm, "status": "skipped_no_user_data"})
+            print("[PURCHASE] skipped_no_user_data utm=", utm, "| row=", row)
             continue
 
         user_data_purchase = cache["user_data"]
@@ -313,11 +329,21 @@ async def upload_csv(file: UploadFile = File(...)):
             "num_purchases": vendas
         }
 
+        # LOG antes de enviar
+        print("[PURCHASE] utm=", utm,
+              "| value=", valor,
+              "| num_purchases=", vendas,
+              "| event_time=", event_time,
+              "| fbc=", user_data_purchase.get("fbc"),
+              "| fbp=", user_data_purchase.get("fbp"),
+              "| source_url=", event_source_url)
+
         try:
             resp = send_fb_event("Purchase", utm, event_source_url, user_data_purchase, custom_data_purchase, event_time)
             processed.append({"utm_content": raw_utm, "utm_norm": utm, "status": "sent", "capi": resp})
+            print("[PURCHASE] sent utm=", utm, "| capi_resp=", resp)
         except Exception as e:
             processed.append({"utm_content": raw_utm, "utm_norm": utm, "status": "error", "error": str(e)})
+            print("[PURCHASE] error utm=", utm, "| error=", str(e))
 
     return JSONResponse({"processed": processed})
-
