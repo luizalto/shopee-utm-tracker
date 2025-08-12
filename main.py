@@ -13,7 +13,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 
 # ───────────────────────────── CONFIG ─────────────────────────────
 
-DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/")
+DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53eafnvh01ho&utm_campaign=id_KZh1YNURmU&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dh2byqcm489v&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014")
 
 FB_PIXEL_ID     = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID")
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN")
@@ -347,3 +347,4 @@ async def upload_csv(file: UploadFile = File(...)):
             print("[PURCHASE] error utm=", utm, "| error=", str(e))
 
     return JSONResponse({"processed": processed})
+
