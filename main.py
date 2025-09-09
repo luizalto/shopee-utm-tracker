@@ -157,39 +157,64 @@ def allow_viewcontent(ip: str, ua: str, utm: str) -> Tuple[bool,str,int]:
 
 # ───────────────────────────── BRIDGE PARA TIKTOK ─────────────────────────────
 def _tiktok_bridge_html(target_url: str) -> str:
-    safe_url = target_url
+    """
+    Mostra botão full-screen para captar gesto do usuário e abrir a Shopee.
+    Ordem:
+      1) Universal link (https://s.shopee.com.br/...)
+      2) Android intent com com.shopee.br (Brasil)
+      3) Android intent fallback com com.shopee.app (global)
+    """
+    safe_url = target_url  # não alterar parâmetros da Shopee
     return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Abrindo Shopee…</title>
+<title>Abrir no app da Shopee</title>
 <style>
-body{{font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0b1526;color:#fff}}
-.card{{max-width:520px;width:92%;background:#111827;border-radius:16px;padding:24px;text-align:center}}
-.btn{{margin-top:16px;padding:14px 18px;border-radius:12px;background:#ff4d00;color:#fff;text-decoration:none;font-weight:700;display:none}}
+  :root{{--bg:#0b1526;--card:#111827;--txt:#e5e7eb;--btn:#ff4d00;}}
+  *{{box-sizing:border-box}}
+  body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto}}
+  .wrap{{max-width:640px;width:92%;text-align:center;background:var(--card);padding:28px;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.4)}}
+  h1{{font-size:20px;margin:0 0 8px}}
+  p{{opacity:.9;line-height:1.45;margin:0}}
+  .btn{{display:inline-block;margin-top:18px;padding:16px 18px;border-radius:12px;background:var(--btn);color:#fff;text-decoration:none;font-weight:800;font-size:16px}}
+  .muted{{opacity:.75;font-size:12px;margin-top:10px}}
 </style>
 <script>
 (function(){{
   var targetUrl = {json.dumps(safe_url)};
-  function tryOpen(){{
-    try{{window.location.href=targetUrl;}}catch(e){{}}
-    var ua=navigator.userAgent||"",isAndroid=/Android/i.test(ua);
-    var intentUrl="intent://"+targetUrl.replace(/^https?:\\/\\//,"")+"#Intent;scheme=https;package=com.shopee.app;S.browser_fallback_url="+encodeURIComponent(targetUrl)+";end";
-    setTimeout(function(){{if(isAndroid)try{{window.location.href=intentUrl;}}catch(e){{}}}},900);
-    setTimeout(function(){{document.getElementById('btn').style.display='inline-block';}},2000);
+  function openNow(){{
+    try{{ window.location.href = targetUrl; }}catch(e){{}}
+    var ua = navigator.userAgent || "";
+    var isAndroid = /Android/i.test(ua);
+
+    // Android: tenta pacote brasileiro primeiro
+    if(isAndroid){{
+      var intentBr = "intent://" + targetUrl.replace(/^https?:\\/\\//,"") +
+                     "#Intent;scheme=https;package=com.shopee.br;S.browser_fallback_url=" +
+                     encodeURIComponent(targetUrl) + ";end";
+      setTimeout(function(){{ try{{ window.location.href = intentBr; }}catch(e){{}} }}, 120);
+
+      // Fallback para pacote global
+      var intentGlobal = "intent://" + targetUrl.replace(/^https?:\\/\\//,"") +
+                         "#Intent;scheme=https;package=com.shopee.app;S.browser_fallback_url=" +
+                         encodeURIComponent(targetUrl) + ";end";
+      setTimeout(function(){{ try{{ window.location.href = intentGlobal; }}catch(e){{}} }}, 600);
+    }}
   }}
-  window.reopenApp=function(){{tryOpen();}};
-  document.addEventListener('DOMContentLoaded',tryOpen);
+  window._openShopee = openNow;
+  // NÃO chama automaticamente — requer gesto do usuário (tap no botão)
 }})();
 </script>
 </head>
 <body>
-<div class="card">
-  <h1>Abrindo no app da Shopee…</h1>
-  <p>Se não abrir, toque abaixo:</p>
-  <a id="btn" class="btn" href="javascript:reopenApp()">Abrir no app</a>
-</div>
+  <div class="wrap">
+    <h1>Abrir no app da Shopee</h1>
+    <p>Toque no botão abaixo para abrir no app. Se não abrir, toque novamente.</p>
+    <a class="btn" href="javascript:_openShopee()">Abrir no app da Shopee</a>
+    <p class="muted">Dica: confirme “Abrir no app” se o TikTok solicitar.</p>
+  </div>
 </body>
 </html>"""
 
@@ -224,10 +249,15 @@ def redirect_to_shopee(request: Request,
     try: dest = generate_short_link(link,utm_value)
     except: dest = replace_utm_content_only(link,utm_value)
 
-    ua_lower=user_agent.lower()
-    if "tiktok" in ua_lower or "ttwebview" in ua_lower:
-        return HTMLResponse(content=_tiktok_bridge_html(dest),status_code=200)
-    return RedirectResponse(dest,status_code=302)
+    ua_lower = user_agent.lower()
+    is_tiktok = ("tiktok" in ua_lower) or ("ttwebview" in ua_lower)
+
+    if is_tiktok:
+        # Em webview do TikTok: exigir gesto do usuário (botão) para abrir app
+        return HTMLResponse(content=_tiktok_bridge_html(dest), status_code=200)
+
+    # Fora do TikTok: redirect normal
+    return RedirectResponse(dest, status_code=302)
 
 # ───────────────────────────── RUN LOCAL ─────────────────────────────
 if __name__=="__main__":
