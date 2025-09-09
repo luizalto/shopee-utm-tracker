@@ -14,20 +14,17 @@ import redis
 from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import FastAPI, Request, Query, UploadFile, File, Body
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse  # <- HTMLResponse adicionado
 
 # ───────────────────────────── CONFIG ÚNICA ─────────────────────────────
-# Você pode deixar TUDO aqui no arquivo. Se preferir, qualquer item pode ser
-# sobrescrito por variável de ambiente com o mesmo nome.
-
 DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53eafnvh01ho&utm_campaign=id_KZh1YNURmU&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dh2byqcm489v&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014")
 
-# Credenciais da Meta (Conversions API)
+# Credenciais da Meta (Conversions API) — mantido
 FB_PIXEL_ID     = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID") or "COLOQUE_SEU_PIXEL_ID_AQUI"
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN") or "COLOQUE_SEU_ACCESS_TOKEN_AQUI"
 FB_ENDPOINT     = f"https://graph.facebook.com/v14.0/{FB_PIXEL_ID}/events?access_token={FB_ACCESS_TOKEN}"
 
-# Shopee Affiliate
+# Shopee Affiliate — mantido
 SHOPEE_APP_ID     = os.getenv("SHOPEE_APP_ID", "18314810331")
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET", "LO3QSEG45TYP4NYQBRXLA2YYUL3ZCUPN")
 SHOPEE_ENDPOINT   = "https://open-api.affiliate.shopee.com.br/graphql"
@@ -46,48 +43,29 @@ USERDATA_KEY_PREFIX  = os.getenv("USERDATA_KEY_PREFIX", "ud:")
 # Janela máxima para compras atrasadas (7 dias)
 MAX_DELAY_SECONDS = int(os.getenv("MAX_DELAY_SECONDS", str(7 * 24 * 60 * 60)))
 
-# Controle anti-bot / repetição (fingerprint = IP + device/os simplificado)
-CLICK_WINDOW_SECONDS   = int(os.getenv("CLICK_WINDOW_SECONDS", "3600"))  # Janela de repetição (1h)
-MAX_CLICKS_PER_FP      = int(os.getenv("MAX_CLICKS_PER_FP", "2"))        # A partir do 3º bloqueia VC
+# Controle anti-bot / repetição
+CLICK_WINDOW_SECONDS   = int(os.getenv("CLICK_WINDOW_SECONDS", "3600"))
+MAX_CLICKS_PER_FP      = int(os.getenv("MAX_CLICKS_PER_FP", "2"))
 FINGERPRINT_PREFIX     = os.getenv("FINGERPRINT_PREFIX", "fp:")
 
-# Evento custom para auditoria interna (apenas logs; não enviado para Meta)
+# Evento custom para auditoria interna
 EMIT_INTERNAL_BLOCK_LOG = True
 
 # Segurança básica em endpoints admin
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "troque_este_token_admin")
 
 # ───────────────────────────── LISTAS EMBUTIDAS ─────────────────────────────
-# Você pode embutir IPs/UA ou prefixos. Pode também usar CIDR em IP ranges.
-# Os endpoints /admin/... permitem gerenciar em tempo real sem redeploy.
+SEEDED_WHITELIST_IPS = []
+SEED_WHITELIST_CIDRS = []
+SEED_WHITELIST_UA_SUBSTR = []
 
-SEEDED_WHITELIST_IPS = [
-    # Exemplos:
-    # "179.222.237.119",
-    # "187.44.149.98",
-]
-SEED_WHITELIST_CIDRS = [
-    # "170.84.56.0/24",
-]
-SEED_WHITELIST_UA_SUBSTR = [
-    # "iPhone; CPU iPhone OS",  # exemplo: priorizar iOS real
-]
-
-SEEDED_BLACKLIST_IPS = [
-    # Exemplos de IPs problemas (preencher se desejar)
-    # "170.254.85.252",
-]
-SEED_BLACKLIST_CIDRS = [
-    # "45.162.43.0/24",
-]
-SEED_BLACKLIST_UA_SUBSTR = [
-    # padrões de bot/app webview hiper repetitivos
-    # "wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0",  # webview genérica
-]
+SEEDED_BLACKLIST_IPS = []
+SEED_BLACKLIST_CIDRS = []
+SEED_BLACKLIST_UA_SUBSTR = []
 
 # ───────────────────────────── APP / REDIS ─────────────────────────────
 r = redis.from_url(REDIS_URL)
-app = FastAPI(title="Shopee UTM + Meta CAPI Server c/ Anti-Bot, Whitelist/Blacklist")
+app = FastAPI(title="Shopee UTM + Meta CAPI Server c/ Anti-Bot, Whitelist/Blacklist + TikTok Bridge")
 
 # ───────────────────────────── HELPERS BÁSICOS ─────────────────────────────
 
@@ -126,7 +104,8 @@ def replace_utm_content_only(raw_url: str, new_value: str) -> str:
                 break
         if not found:
             parts.append("utm_content=" + new_value)
-        new_query = "&".join(parts)
+        new_query = "&join".replace("join", "join").join(parts)  # mantém ordem original; não reordena
+        new_query = "&".join(parts)  # (garantia)
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 
 def build_fbc_from_fbclid(fbclid: Optional[str], creation_ts: Optional[int] = None) -> Optional[str]:
@@ -196,8 +175,7 @@ def send_fb_event(event_name: str,
             "event_source_url": event_source_url,
             "user_data": user_data,
             "custom_data": custom_data
-        }]
-    }
+        }]}
     rqs = requests.post(FB_ENDPOINT, json=payload, timeout=20)
     try:
         out = rqs.json()
@@ -208,22 +186,14 @@ def send_fb_event(event_name: str,
 # ───────────────────────────── UA / FINGERPRINT / LISTAS ─────────────────────────────
 
 def parse_device_os(ua: str) -> Tuple[str, str]:
-    """
-    Extrai device/os (bem simples) para fingerprint e métricas.
-    Retorna (os_family, os_version_major).
-    """
     if not ua:
         return ("-", "-")
-
-    # iOS
     m = re.search(r"iPhone OS (\d+)_?", ua) or re.search(r"CPU iPhone OS (\d+)", ua)
     if m:
         return ("iOS", m.group(1))
-    # Android
     m = re.search(r"Android (\d+)", ua)
     if m:
         return ("Android", m.group(1))
-    # Fallback
     if "iPhone" in ua or "iPad" in ua:
         return ("iOS", "-")
     if "Android" in ua:
@@ -259,43 +229,26 @@ class ListManager:
         self.blacklist_ua_substr: set = set(SEED_BLACKLIST_UA_SUBSTR)
 
     def is_whitelisted(self, ip: str, ua: str) -> bool:
-        if ip in self.whitelist_ips:
-            return True
-        if _ip_in_cidrs(ip, self.whitelist_cidrs):
-            return True
+        if ip in self.whitelist_ips: return True
+        if _ip_in_cidrs(ip, self.whitelist_cidrs): return True
         for sub in self.whitelist_ua_substr:
-            if sub and sub in ua:
-                return True
+            if sub and sub in ua: return True
         return False
 
     def is_blacklisted(self, ip: str, ua: str) -> bool:
-        if ip in self.blacklist_ips:
-            return True
-        if _ip_in_cidrs(ip, self.blacklist_cidrs):
-            return True
+        if ip in self.blacklist_ips: return True
+        if _ip_in_cidrs(ip, self.blacklist_cidrs): return True
         for sub in self.blacklist_ua_substr:
-            if sub and sub in ua:
-                return True
+            if sub and sub in ua: return True
         return False
 
     # Admin ops
-    def add_whitelist_ip(self, ip: str):
-        self.whitelist_ips.add(ip)
-
-    def add_blacklist_ip(self, ip: str):
-        self.blacklist_ips.add(ip)
-
-    def add_whitelist_cidr(self, cidr: str):
-        self.whitelist_cidrs.append(cidr)
-
-    def add_blacklist_cidr(self, cidr: str):
-        self.blacklist_cidrs.append(cidr)
-
-    def add_whitelist_ua(self, substr: str):
-        self.whitelist_ua_substr.add(substr)
-
-    def add_blacklist_ua(self, substr: str):
-        self.blacklist_ua_substr.add(substr)
+    def add_whitelist_ip(self, ip: str): self.whitelist_ips.add(ip)
+    def add_blacklist_ip(self, ip: str): self.blacklist_ips.add(ip)
+    def add_whitelist_cidr(self, cidr: str): self.whitelist_cidrs.append(cidr)
+    def add_blacklist_cidr(self, cidr: str): self.blacklist_cidrs.append(cidr)
+    def add_whitelist_ua(self, substr: str): self.whitelist_ua_substr.add(substr)
+    def add_blacklist_ua(self, substr: str): self.blacklist_ua_substr.add(substr)
 
     def dump(self) -> Dict[str, Any]:
         return {
@@ -313,28 +266,77 @@ def fp_counter_key(fp: str) -> str:
     return f"{FINGERPRINT_PREFIX}{fp}"
 
 def allow_viewcontent(ip: str, ua: str, utm: str) -> Tuple[bool, str, int]:
-    """
-    Retorna (allowed, reason, current_count).
-    Regra:
-      - WHITELIST => sempre permite (reason="whitelist")
-      - BLACKLIST => bloqueia (reason="blacklist")
-      - Caso normal: rate-limit por fingerprint (MAX_CLICKS_PER_FP em CLICK_WINDOW_SECONDS).
-    """
     if LISTS.is_whitelisted(ip, ua):
         return True, "whitelist", 0
     if LISTS.is_blacklisted(ip, ua):
         return False, "blacklist", 0
-
     fp = make_fingerprint(ip, ua)
     key = fp_counter_key(fp)
-    # INCR e se for primeira vez, definir TTL da janela
     cnt = r.incr(key)
     if cnt == 1:
         r.expire(key, CLICK_WINDOW_SECONDS)
-
     if cnt > MAX_CLICKS_PER_FP:
         return False, "rate_limited", int(cnt)
     return True, "ok", int(cnt)
+
+# ───────────────────────────── BRIDGE HTML (somente para TikTok) ─────────────────────────────
+
+def _tiktok_bridge_html(target_url: str) -> str:
+    """
+    HTML que tenta abrir o app da Shopee:
+      1) universal link (s.shopee.com.br/...) — iOS/Android
+      2) intent:// (Android fallback)
+      3) botão 'Abrir no app' se o webview bloquear
+    Não reescreve nem reordena parâmetros do target_url.
+    """
+    safe_url = target_url  # não alterar!
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Abrindo Shopee…</title>
+<style>
+  body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial;margin:0;background:#0b1526;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center}}
+  .card{{max-width:520px;width:92%;background:#111827;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.4)}}
+  h1{{font-size:20px;margin:0 0 10px}}
+  p{{color:#cbd5e1;line-height:1.45}}
+  .btn{{display:inline-block;margin-top:16px;padding:14px 18px;border-radius:12px;background:#ff4d00;color:#fff;text-decoration:none;font-weight:700}}
+  .note{{font-size:12px;opacity:.8;margin-top:10px}}
+</style>
+<script>
+(function(){
+  var targetUrl = {json.dumps(safe_url)};
+  if(!targetUrl) return;
+
+  function tryOpen(){
+    try{{ window.location.href = targetUrl; }}catch(e){{}}
+    var ua = navigator.userAgent || "";
+    var isAndroid = /Android/i.test(ua);
+
+    var intentUrl = "intent://" + targetUrl.replace(/^https?:\\/\\//,"") +
+                    "#Intent;scheme=https;package=com.shopee.app;S.browser_fallback_url=" +
+                    encodeURIComponent(targetUrl) + ";end";
+
+    setTimeout(function(){ if(isAndroid){{ try{{ window.location.href = intentUrl; }}catch(e){{}} }} }, 900);
+    setTimeout(function(){ var b = document.getElementById('open-btn'); if(b) b.style.display='inline-block'; }, 2000);
+  }
+
+  window.reopenApp = function(){ tryOpen(); };
+
+  document.addEventListener('DOMContentLoaded', function(){ tryOpen(); });
+})();
+</script>
+</head>
+<body>
+  <div class="card">
+    <h1>Abrindo no app da Shopee…</h1>
+    <p id="msg">Se não abrir automaticamente, toque no botão abaixo.</p>
+    <a id="open-btn" class="btn" style="display:none" href="javascript:reopenApp()">Abrir no app</a>
+    <p class="note">Dica: autorize “Abrir em Shopee” se o TikTok pedir confirmação.</p>
+  </div>
+</body>
+</html>"""
 
 # ───────────────────────────── ROUTES ─────────────────────────────
 
@@ -344,7 +346,7 @@ def health():
 
 @app.get("/version")
 def version():
-    return {"name": "utm-meta-capi-anti-bot", "version": "1.0.0"}
+    return {"name": "utm-meta-capi-anti-bot", "version": "1.1.0-tiktok-bridge"}
 
 @app.get("/")
 def redirect_to_shopee(
@@ -352,12 +354,15 @@ def redirect_to_shopee(
     link: str = Query(DEFAULT_PRODUCT_URL, description="URL completa da Shopee")
 ):
     """
-    1) Gera UTM único
-    2) Verifica se pode enviar ViewContent (whitelist/blacklist/rate-limit)
-    3) Envia VC (se permitido) com event_time = vc_time
-    4) Salva user_data no Redis para possível Purchase
-    5) Gera short link da Shopee (fallback: URL com utm_content)
-    6) Redireciona SEMPRE para Shopee (mesmo se VC bloqueado)
+    Fluxo mantido:
+      1) Gera UTM único
+      2) Whitelist/Blacklist/Rate-limit
+      3) Envia ViewContent (Meta CAPI) se permitido
+      4) Salva user_data no Redis
+      5) Gera short link oficial da Shopee (fallback: URL com utm_content)
+      6) Redireciona SEMPRE — porém:
+         - Se origem for TikTok webview, devolve HTML Bridge que força abrir o app.
+         - Caso contrário, 302 normal pro shortlink.
     """
     # 1) UTM
     utm_value = incr_and_make_utm()
@@ -379,14 +384,9 @@ def redirect_to_shopee(
     allowed, reason, cnt = allow_viewcontent(ip_addr, user_agent, utm_value)
 
     fbc_val = build_fbc_from_fbclid(fbclid, creation_ts=vc_time)
-    user_data_vc: Dict[str, Any] = {
-        "client_ip_address": ip_addr,
-        "client_user_agent": user_agent
-    }
-    if fbp_cookie:
-        user_data_vc["fbp"] = fbp_cookie
-    if fbc_val:
-        user_data_vc["fbc"] = fbc_val
+    user_data_vc: Dict[str, Any] = {"client_ip_address": ip_addr, "client_user_agent": user_agent}
+    if fbp_cookie: user_data_vc["fbp"] = fbp_cookie
+    if fbc_val:    user_data_vc["fbc"] = fbc_val
 
     capi_vc_resp: Dict[str, Any] = {"skipped": True, "reason": reason}
     if allowed:
@@ -402,7 +402,7 @@ def redirect_to_shopee(
         except Exception as e:
             capi_vc_resp = {"error": str(e)}
 
-    # 4) Salva no Redis (mesmo se bloqueado, para auditoria/possível unificação)
+    # 4) Salva no Redis
     save_user_data(utm_value, {
         "user_data": user_data_vc,
         "event_source_url": link,
@@ -440,20 +440,20 @@ def redirect_to_shopee(
             "utm": utm_value, "ip": ip_addr, "ua": user_agent, "reason": reason, "cnt": cnt
         }, ensure_ascii=False))
 
-    # 6) Redireciona
+    # 6) Direcionamento:
+    #    - TikTok webview => HTML bridge que tenta abrir app (universal link + intent://)
+    #    - Caso contrário => 302 normal para o shortlink/URL Shopee
+    ua_lower = user_agent.lower()
+    is_tiktok = ("tiktok" in ua_lower) or ("ttwebview" in ua_lower)
+
+    if is_tiktok:
+        html = _tiktok_bridge_html(dest)
+        return HTMLResponse(content=html, status_code=200)
+
     return RedirectResponse(dest, status_code=302)
 
 @app.post("/upload_csv")
 async def upload_csv(file: UploadFile = File(...)):
-    """
-    CSV com colunas:
-      - utm_content (ou: utm, sub_id3, subid3, sub_id_3)  [obrigatória]
-      - value        (ou: valor, price, amount)            [opcional]
-      - num_purchases(ou: vendas, quantity, qty, purchases)[opcional]
-
-    *Não* usa data do CSV: usa vc_time salvo no Redis (ViewContent) como event_time do Purchase.
-    Respeita janela MAX_DELAY_SECONDS e coerência com FBC.
-    """
     content = await file.read()
     text = content.decode("utf-8", errors="replace").splitlines()
     reader = csv.DictReader(text)
@@ -470,6 +470,7 @@ async def upload_csv(file: UploadFile = File(...)):
         utm = normalize_utm(raw_utm)
         if not utm:
             processed.append({"row": row, "status": "skipped_no_utm"})
+            print("[PURCHASE] skipped_no_utm row=", row)
             continue
 
         valor_raw = row.get("value") or row.get("valor") or row.get("price") or row.get("amount")
@@ -495,7 +496,6 @@ async def upload_csv(file: UploadFile = File(...)):
         vc_time            = cache.get("vc_time")
         event_time = int(vc_time) if isinstance(vc_time, int) else now_ts
 
-        # Correções de janela e coerência
         if event_time > now_ts:
             event_time = now_ts
         if event_time < min_allowed:
@@ -504,7 +504,6 @@ async def upload_csv(file: UploadFile = File(...)):
         if click_ts and event_time < click_ts:
             event_time = click_ts + 1
 
-        # (Opcional) reforço: só envia Purchase se o VC foi permitido
         if cache.get("allowed_vc") is False:
             processed.append({"utm_content": raw_utm, "utm_norm": utm, "status": "skipped_blocked_vc"})
             print("[PURCHASE] skipped_blocked_vc utm=", utm)
@@ -642,8 +641,6 @@ def admin_config(token: str):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=401)
 
 # ───────────────────────────── UVICORN (local) ─────────────────────────────
-# No Render, configure o Start Command para: uvicorn main:app --host 0.0.0.0 --port 10000
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "10000"))
