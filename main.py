@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request, Query, UploadFile, File, Body
 from fastapi.responses import RedirectResponse, JSONResponse
 
 # ───────────────────────────── CONFIG ─────────────────────────────
-DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/")
+DEFAULT_PRODUCT_URL = os.getenv("DEFAULT_PRODUCT_URL", "https://shopee.com.br/XEIJAIYI-8pcs-Kit-De-Gel-De-Extens%C3%A3o-De-Unhas-De-Polietileno-15ml-Nude-Pink-All-In-One-Construtor-Cola-Com-Formas-Duplas-Clipes-Manicure-Set-For-Beginnerer-i.1006215031.25062459693?gads_t_sig=VTJGc2RHVmtYMTlxTFVSVVRrdENkZXc2VFhGUzZQUkd1d3gzNWRibGNNTGhZcHpmUXJtRWlOUTZPVHhQMWs5d044UE94KzA2cUliZ2gzZENsbGdmUWo1ZVo3RlRKbHBrNjdyLzVLZ3FrZEczYlVlMjlLNklYbmVHKy9aWjB0K01mWC9ad3BtWTQwTzBlQ0l3dlBEWjFLUnN6L014YzZOYUcvK3dZcENQUWg1ODNrdEJjVGtLSkx0WFBDQ2ZNWmswNmxQN1hHREpIelJEamNpRFdhWUVKTmZKTXY3bXp6M2FtM3FnQUJNaVhYazh2aDlXQnQzMk04RGxVQkRqeXliWExYN0p3aWU5MndOU2hpbmsrQ3dxQ1hZTzRqNEpwZXI1N3BJazg3ejhYekoxTklFTlJ5NWtZWSt4Q0RZU2pMUWtSakQwbGxTeTE1a09OLzh6VFZxdS9VakNPMURUQ0hOSU1HTkIrcUtJZmk2TkNsTlFPUzlZLzFyWHdsNFFCQWxR&sp_atk=7d9b4afa-fe7b-46a4-8d67-40beca78c014&uls_trackid=53lsdf9801le&utm_campaign=id_kurWDMnD0u&utm_content=----&utm_medium=affiliates&utm_source=an_18314810331&utm_term=dn7k75xo8cb9&xptdk=7d9b4afa-fe7b-46a4-8d67-40beca78c014")
 # Meta (Conversions API)
 FB_PIXEL_ID     = os.getenv("FB_PIXEL_ID") or os.getenv("META_PIXEL_ID") or "COLOQUE_SEU_PIXEL_ID_AQUI"
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN") or os.getenv("META_ACCESS_TOKEN") or "COLOQUE_SEU_ACCESS_TOKEN_AQUI"
@@ -462,4 +462,5 @@ async def admin_upload_model(token: str = Query(...), file: UploadFile = File(..
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
+
 
