@@ -48,7 +48,7 @@ FINGERPRINT_PREFIX   = os.getenv("FINGERPRINT_PREFIX", "fp:")
 EMIT_INTERNAL_BLOCK_LOG = True
 
 # Segurança admin
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "troque_este_token_admin")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "12345678")
 
 # ── Scoring (consome regras/modelo já treinados) ───────────────────────────
 ATC_BASELINE_RATE = float(os.getenv("ATC_BASELINE_RATE", "0.05"))
@@ -462,3 +462,4 @@ async def admin_upload_model(token: str = Query(...), file: UploadFile = File(..
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
+
