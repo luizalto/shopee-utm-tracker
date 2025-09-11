@@ -52,7 +52,7 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "12345678")
 
 # ── Scoring (consome regras/modelo já treinados) ───────────────────────────
 ATC_BASELINE_RATE = float(os.getenv("ATC_BASELINE_RATE", "0.05"))
-ATC_THRESHOLD     = float(os.getenv("ATC_THRESHOLD", "0.08"))
+ATC_THRESHOLD     = float(os.getenv("ATC_THRESHOLD", "0.15"))
 ATC_MAX_RATE      = float(os.getenv("ATC_MAX_RATE", "0.25"))
 RULES_KEY         = os.getenv("RULES_KEY", "rules:hour_category")  # JSON
 MODEL_KEY         = os.getenv("MODEL_KEY", "model:logreg")         # pickle bytes
@@ -462,5 +462,6 @@ async def admin_upload_model(token: str = Query(...), file: UploadFile = File(..
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")), reload=False)
+
 
 
