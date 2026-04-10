@@ -25,7 +25,6 @@ SHOPEE_ENDPOINT = "https://open-api.affiliate.shopee.com.br/graphql"
 META_PIXEL_ID = os.getenv("META_PIXEL_ID")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 
-# 🔥 CONTROLE DE SEQUÊNCIA
 USE_SEQUENCE = os.getenv("USE_SEQUENCE", "true").lower() == "true"
 
 r = redis.from_url(REDIS_URL)
@@ -60,6 +59,10 @@ def get_cookie(cookie_header,name):
 def next_number():
     return int(r.incr(COUNTER_KEY))
 
+# 🔥 LIMPA TUDO (SÓ LETRA E NÚMERO)
+def clean(s):
+    return "".join(c for c in str(s) if c.isalnum())
+
 def set_utm(url,value):
 
     parts=urlsplit(url)
@@ -80,7 +83,7 @@ def set_utm(url,value):
     return urlunsplit((parts.scheme,parts.netloc,parts.path,new_query,parts.fragment))
 
 # =============================
-# SHOPEE SHORTLINK
+# SHOPEE
 # =============================
 
 def generate_short_link(origin_url,subid):
@@ -126,7 +129,7 @@ def generate_short_link(origin_url,subid):
     return j["data"]["generateShortLink"]["shortLink"]
 
 # =============================
-# META EVENTS
+# META
 # =============================
 
 def send_viewcontent(data):
@@ -154,7 +157,6 @@ def send_viewcontent(data):
     }
 
     params={"access_token":META_ACCESS_TOKEN}
-
     session.post(url,params=params,json=payload)
 
 def send_purchase(data):
@@ -183,32 +185,10 @@ def send_purchase(data):
     }
 
     params={"access_token":META_ACCESS_TOKEN}
-
     session.post(url,params=params,json=payload)
 
 # =============================
-# PURCHASE
-# =============================
-
-@app.get("/send_purchase")
-def purchase(utm:str=None):
-
-    if not utm:
-        return {"error":"missing utm"}
-
-    data=r.get(f"click:{utm}")
-
-    if not data:
-        return {"status":"utm_not_found","utm":utm}
-
-    data=json.loads(data)
-
-    send_purchase(data)
-
-    return {"status":"purchase sent"}
-
-# =============================
-# CLICK HANDLER
+# CLICK
 # =============================
 
 @app.get("/{full_path:path}")
@@ -238,15 +218,29 @@ def click(request:Request,full_path:str):
     if fbclid:
         fbc=f"fb.1.{ts}.{fbclid}"
 
-    # 🔥 NOVO BLOCO
+    # =============================
+    # 🔥 CAPTURA PARAMETROS
+    # =============================
+
     uc = request.query_params.get("uc", "default")
-    pos = request.query_params.get("pos", "Unknown").capitalize()
+    pos = request.query_params.get("pos", "Center")
+
+    if pos not in ["Left", "Middle", "Right"]:
+        pos = "Center"
+
+    # limpa tudo
+    uc = clean(uc)
+    pos = clean(pos)
+
+    # =============================
+    # 🔥 MONTA SUBID (100% COMPATÍVEL)
+    # =============================
 
     if USE_SEQUENCE:
         n = next_number()
-        utm = f"{uc}_{pos}_R{n}"
+        utm = f"{uc}{pos}{n}"
     else:
-        utm = f"{uc}_{pos}"
+        utm = f"{uc}{pos}"
 
     origin_url = set_utm(link, utm)
 
