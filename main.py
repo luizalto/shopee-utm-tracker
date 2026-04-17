@@ -22,8 +22,10 @@ SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID")
 SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET")
 SHOPEE_ENDPOINT = "https://open-api.affiliate.shopee.com.br/graphql"
 
+# 🔴 META TOTALMENTE DESLIGADO
 META_PIXEL_ID = os.getenv("META_PIXEL_ID")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+META_ENABLED = False  # FORÇADO OFF
 
 USE_SEQUENCE = os.getenv("USE_SEQUENCE", "true").lower() == "true"
 
@@ -59,7 +61,6 @@ def get_cookie(cookie_header,name):
 def next_number():
     return int(r.incr(COUNTER_KEY))
 
-# 🔥 LIMPA TUDO (SÓ LETRA E NÚMERO)
 def clean(s):
     return "".join(c for c in str(s) if c.isalnum())
 
@@ -129,63 +130,14 @@ def generate_short_link(origin_url,subid):
     return j["data"]["generateShortLink"]["shortLink"]
 
 # =============================
-# META
+# META (DESLIGADO)
 # =============================
 
 def send_viewcontent(data):
-
-    url=f"https://graph.facebook.com/v17.0/{META_PIXEL_ID}/events"
-
-    payload={
-        "data":[
-            {
-                "event_name":"ViewContent",
-                "event_time":int(time.time()),
-                "action_source":"website",
-                "user_data":{
-                    "client_ip_address":data["ip"],
-                    "client_user_agent":data["ua"],
-                    "fbp":data["fbp"],
-                    "fbc":data["fbc"]
-                },
-                "custom_data":{
-                    "currency":"BRL",
-                    "value":0
-                }
-            }
-        ]
-    }
-
-    params={"access_token":META_ACCESS_TOKEN}
-    session.post(url,params=params,json=payload)
+    return  # 🔴 NÃO FAZ NADA
 
 def send_purchase(data):
-
-    url=f"https://graph.facebook.com/v17.0/{META_PIXEL_ID}/events"
-
-    payload={
-        "data":[
-            {
-                "event_name":"Purchase",
-                "event_time":int(time.time()),
-                "event_id":data["utm"],
-                "action_source":"website",
-                "user_data":{
-                    "client_ip_address":data["ip"],
-                    "client_user_agent":data["ua"],
-                    "fbp":data["fbp"],
-                    "fbc":data["fbc"]
-                },
-                "custom_data":{
-                    "currency":"BRL",
-                    "value":1
-                }
-            }
-        ]
-    }
-
-    params={"access_token":META_ACCESS_TOKEN}
-    session.post(url,params=params,json=payload)
+    return  # 🔴 NÃO FAZ NADA
 
 # =============================
 # CLICK
@@ -219,7 +171,7 @@ def click(request:Request,full_path:str):
         fbc=f"fb.1.{ts}.{fbclid}"
 
     # =============================
-    # 🔥 CAPTURA PARAMETROS
+    # PARAMETROS
     # =============================
 
     uc = request.query_params.get("uc", "default")
@@ -228,12 +180,11 @@ def click(request:Request,full_path:str):
     if pos not in ["Left", "Middle", "Right"]:
         pos = "Center"
 
-    # limpa tudo
     uc = clean(uc)
     pos = clean(pos)
 
     # =============================
-    # 🔥 MONTA SUBID (100% COMPATÍVEL)
+    # UTM
     # =============================
 
     if USE_SEQUENCE:
@@ -260,6 +211,7 @@ def click(request:Request,full_path:str):
 
     r.setex(f"click:{utm}",604800,json.dumps(data))
 
+    # 🔴 NÃO ENVIA MAIS NADA PRO META
     send_viewcontent(data)
 
     resp=RedirectResponse(short)
