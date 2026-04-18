@@ -178,7 +178,7 @@ def click(request:Request,full_path:str):
     pos = request.query_params.get("pos", "")
 
     if pos not in ["Left", "Middle", "Right"]:
-        pos = "Center"
+        pos = ""
     
     pos = clean(pos)
 
