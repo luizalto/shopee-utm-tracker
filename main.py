@@ -175,7 +175,7 @@ def click(request:Request,full_path:str):
     # =============================
 
     uc = request.query_params.get("uc", "default")
-    pos = request.query_params.get("pos", "Center")
+    pos = request.query_params.get("pos", "")
 
     if pos not in ["Left", "Middle", "Right"]:
         pos = "Center"
