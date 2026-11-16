@@ -42,9 +42,15 @@ POOL_TTL = int(os.getenv("POOL_TTL_SECONDS", "172800"))       # 48h
 POOL_MIN = int(os.getenv("POOL_MIN_PER_UTM", "10"))
 POOL_META_HOURS = int(os.getenv("POOL_META_HOURS", "4"))
 POOL_MARGIN = int(os.getenv("POOL_MARGIN", "2"))
-# Reservas por UTM quando em tempestade: divide os candidatos do casamento
-# por horário (R=24 → vizinho 24x mais distante → ~95%+ de acerto na pessoa)
-R_TARGET = int(os.getenv("RESERVA_POOL_SIZE", "24"))
+# Reservas por UTM: R dinâmico = pico de cliques/minuto observado (teto 500).
+# O índice do rodízio amarra ao ordinal do clique DENTRO do minuto: cada
+# RESERVA<k> só reencontra gente do seu minuto → 1 candidato por compra → ~100%.
+RESERVA_MAX = int(os.getenv("RESERVA_MAX", "500"))
+RESERVA_MIN = int(os.getenv("RESERVA_MIN", "5"))
+
+def desired_reservas(utm_base):
+    rcmax = int(r.get(f"rcmax:{utm_base}") or 0)
+    return max(RESERVA_MIN, min(RESERVA_MAX, int(rcmax * 1.25) + 1))
 
 r = redis.from_url(REDIS_URL)
 session = requests.Session()
@@ -247,7 +253,7 @@ def read_planob(utm_base):
         return []
     return [e for e in lst if time.time() - e.get("ts", 0) <= 30 * 3600]
 
-def ensure_planob(utm_base, link, count=1, retries=0):
+def ensure_planob(utm_base, link, count=5, retries=0):
     """Mantém `count` reservas da UTM (rodízio). Custo: só cria as que faltam."""
     lst = read_planob(utm_base)
     if len(lst) >= count and all(time.time() - e.get("ts", 0) < 24 * 3600 for e in lst):
@@ -284,53 +290,33 @@ def demand_meta(utm_base):
     return max(POOL_MIN, recent * POOL_MARGIN)
 
 def filler_loop():
+    """ENCHEDOR DE RESERVAS (piscina desligada): mantém R dinâmico reservas
+    por UTM ativa — R = pico de cliques/minuto observado (teto 500). Renova
+    24h em 24h; o ritmo é o mesmo orçamento de API de antes."""
     time.sleep(30)  # espera o serviço aquecer
     while True:
         try:
-            candidates = []
             for key in r.scan_iter("dlog:*", count=500):
                 utm_base = key.decode().split(":", 1)[1]
                 if not r.exists(key):
-                    r.delete(pool_key(utm_base))
+                    r.delete(f"planob:{utm_base}")
                     continue
-                size = r.llen(pool_key(utm_base))
-                meta = demand_meta(utm_base)
-                if size < meta:
-                    candidates.append((meta - size, utm_base))
-            candidates.sort(reverse=True)  # maior déficit primeiro
-            for deficit, utm_base in candidates:
                 link = r.get(lastlink_key(utm_base))
                 if not link:
                     continue
-                # PLANO B: UTM em tempestade (usou reserva nas últimas 24h) mantém
-                # R_TARGET reservas; UTM tranquila mantém só 1. Renova 24h em 24h.
-                tempestade = int(r.get(f"lr:{utm_base}") or 0) > 0
-                desejado = R_TARGET if tempestade else 1
+                desejado = desired_reservas(utm_base)
                 try:
                     antes = len(read_planob(utm_base))
                     ensure_planob(utm_base, link.decode(), count=desejado)
                     if len(read_planob(utm_base)) > antes:
                         time.sleep(filler_state["interval"])
+                except ShopeeApiError as e:
+                    if is_rate_limit(e.payload):
+                        filler_state["interval"] = min(30.0, filler_state["interval"] * 1.6)
+                        print("Rate limit no filler; novo ritmo(s):", round(filler_state["interval"], 1))
+                        time.sleep(10)
                 except Exception:
-                    pass  # planob é reserva; falha aqui não trava a piscina
-                for _ in range(min(deficit, 25)):
-                    if pool_total() >= POOL_MAX_TOTAL:
-                        break
-                    try:
-                        entry = create_pool_entry(link.decode(), utm_base)
-                    except ShopeeApiError as e:
-                        if is_rate_limit(e.payload):
-                            filler_state["interval"] = min(30.0, filler_state["interval"] * 1.6)
-                            print("Rate limit no filler; novo ritmo(s):", round(filler_state["interval"], 1))
-                            time.sleep(10)
-                        break
-                    except Exception as e:
-                        print("Erro criar pool:", str(e)[:150])
-                        break
-                    if not push_pool(utm_base, entry):
-                        break
-                    filler_state["interval"] = max(BASE_INTERVAL, filler_state["interval"] * 0.97)
-                    time.sleep(filler_state["interval"])
+                    pass
         except Exception as e:
             print("Erro filler:", str(e)[:200])
         time.sleep(15)
@@ -417,57 +403,54 @@ def click(request: Request, full_path: str):
     r.ltrim(dlog, -300, -1)
     r.expire(dlog, 48 * 3600)
     r.setex(lastlink_key(utm_base), 7 * 24 * 3600, link)
+    # ordinal do clique DENTRO do minuto (define a reserva do rodízio em tempo real)
+    rc_key = f"rc:{utm_base}:{ts // 60}"
+    n_minuto = int(r.incr(rc_key))
+    r.expire(rc_key, 2 * 3600)
+    if n_minuto > int(r.get(f"rcmax:{utm_base}") or 0):
+        r.setex(f"rcmax:{utm_base}", 48 * 3600, n_minuto)
 
-    # ===== atendimento: piscina primeiro, ao vivo como reserva =====
-    entry = pop_pool(utm_base)
-    served_from = "pool"
+    # ===== atendimento: RESERVA é o caminho principal (instantâneo) =====
+    # Rodízio amarrado ao TEMPO: o n-ésimo clique do minuto pega a reserva
+    # (n mod R); ao chegar na última, volta pra 1. Cada RESERVA<nn> só
+    # reencontra gente do próprio minuto → 1 candidato no casamento por
+    # horário do sync → ~100% de identidade com external_id da pessoa (coluna B).
+    entry = None
+    served_from = None
+    reserves = read_planob(utm_base)
+    if reserves:
+        alvo = desired_reservas(utm_base)
+        idx = (n_minuto - 1) % alvo
+        entry = reserves[idx] if idx < len(reserves) else reserves[(n_minuto - 1) % len(reserves)]
+        served_from = "reserva"
+        r.incr(f"lr:{utm_base}")
+        r.expire(f"lr:{utm_base}", 24 * 3600)
+        # demanda cresceu: escalone reservas até o pico observado (em fundo)
+        if len(reserves) < alvo:
+            threading.Thread(target=ensure_planob, args=(utm_base, link, alvo), daemon=True).start()
     if not entry:
+        # AO VIVO em segundo plano: 1 tentativa rápida (0,9s)
         utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
         origin = set_utm(link, utm)
         try:
-            # orçamento de ~1s: 1 tentativa rápida; se a Shopee não responder
-            # em 0,9s, cai direto pro plano B sem espera adicional
             short = generate_short_link(origin, utm, retries=0, timeout_s=0.9)
             entry = {"short": short, "utm": utm, "ts": ts}
             served_from = "live"
-            # primeiro link da UTM: planta o plano B imediatamente (em fundo),
-            # para que tempestades futuras já tenham reserva universal
-            if not r.exists(f"planob:{utm_base}"):
-                threading.Thread(target=ensure_planob, args=(utm_base, link), daemon=True).start()
+            # primeira vez da UTM: planta a reserva imediatamente (em fundo)
+            threading.Thread(target=ensure_planob, args=(utm_base, link), daemon=True).start()
         except Exception as e:
             print("Erro shortlink live:", str(e)[:200])
-            entry = pop_pool(utm_base)
-            if entry:
-                served_from = "pool"
-            else:
-                # PLANO B: link universal da UTM — último caso, só para não
-                # perder o clique/cookie. Identidade compartilhada (quem criou),
-                # aceita de propósito: comissão e UTM preservadas.
-                # Rodízio entre as reservas da UTM: cada RESERVA<nn> vira um
-                # grupo menor de candidatos no casamento por horário do sync.
-                reserves = read_planob(utm_base)
-                if reserves:
-                    i = int(r.incr(f"planobidx:{utm_base}")) - 1
-                    entry = reserves[i % len(reserves)]
-                    served_from = "lastresort"
-                    r.incr(f"lr:{utm_base}")
-                    r.expire(f"lr:{utm_base}", 24 * 3600)
-                    # tempestade detectada: escalone reservas até R_TARGET (fundo)
-                    if len(reserves) < R_TARGET:
-                        threading.Thread(target=ensure_planob, args=(utm_base, link, R_TARGET), daemon=True).start()
-                if not entry:
-                    # plano B ainda não existe: tenta criá-lo AGORA (1 chamada
-                    # rápida, timeout curto) — cobre exatamente o bootstrap de meio de dia
-                    try:
-                        pb = create_planob_entry(link, utm_base, idx=1, retries=0, timeout_s=1.5)
-                        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps([pb]))
-                        entry = pb
-                        served_from = "lastresort"
-                    except Exception:
-                        entry = None
-            if not entry:
-                # NUNCA mostrar erro: tela de carregamento que tenta de novo sozinha
-                return loading_response()
+            # última chance: criar a reserva AGORA e servir ela
+            try:
+                pb = create_planob_entry(link, utm_base, idx=1, retries=0, timeout_s=1.5)
+                r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps([pb]))
+                entry = pb
+                served_from = "reserva"
+            except Exception:
+                entry = None
+    if not entry:
+        # NUNCA mostrar erro: tela de carregamento que tenta de novo sozinha
+        return loading_response()
 
     utm = entry["utm"]
 
