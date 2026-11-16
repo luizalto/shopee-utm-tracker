@@ -253,14 +253,17 @@ def read_planob(utm_base):
         return []
     return [e for e in lst if time.time() - e.get("ts", 0) <= 30 * 3600]
 
-def ensure_planob(utm_base, link, count=5, retries=0):
-    """Mantém `count` reservas da UTM (rodízio). Custo: só cria as que faltam."""
+def ensure_planob(utm_base, link, count=5, retries=0, max_create=1):
+    """Mantém `count` reservas da UTM. Cria no máximo `max_create` por chamada
+    (ritmo controlado: criar várias de uma vez estoura o rate limit da API)."""
     lst = read_planob(utm_base)
     if len(lst) >= count and all(time.time() - e.get("ts", 0) < 24 * 3600 for e in lst):
         return
-    while len(lst) < count:
+    criados = 0
+    while len(lst) < count and criados < max_create:
         try:
             lst.append(create_planob_entry(link, utm_base, idx=len(lst) + 1, retries=retries))
+            criados += 1
         except Exception as e:
             print("Erro planob:", str(e)[:150])
             break
@@ -425,9 +428,10 @@ def click(request: Request, full_path: str):
         served_from = "reserva"
         r.incr(f"lr:{utm_base}")
         r.expire(f"lr:{utm_base}", 24 * 3600)
-        # demanda cresceu: escalone reservas até o pico observado (em fundo)
+        # demanda cresceu: escalone reservas até o pico observado (em fundo,
+        # 3 por vez — UTM individual não derruba o rate limit da API)
         if len(reserves) < alvo:
-            threading.Thread(target=ensure_planob, args=(utm_base, link, alvo), daemon=True).start()
+            threading.Thread(target=ensure_planob, args=(utm_base, link, alvo, 0, 3), daemon=True).start()
     if not entry:
         # AO VIVO em segundo plano: 1 tentativa rápida (0,9s)
         utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
