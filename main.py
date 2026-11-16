@@ -11,7 +11,7 @@ import redis
 import requests
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from urllib.parse import urlsplit, urlunsplit, unquote
 
 app = FastAPI()
@@ -203,10 +203,48 @@ def pop_pool(utm_base):
             return entry
     return None
 
-def create_pool_entry(link, utm_base):
+# Tela de carregamento mostrada quando NENHUMA camada consegue atender:
+# 3 pontinhos e nova tentativa automática com espera crescente — nunca erro.
+LOADING_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Redirecionando…</title>
+<style>
+body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#fff;font-family:system-ui,sans-serif}
+.dots span{display:inline-block;width:14px;height:14px;margin:0 5px;border-radius:50%;background:#555;animation:b 1.2s infinite ease-in-out}
+.dots span:nth-child(2){animation-delay:.15s}.dots span:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,80%,100%{transform:scale(.5);opacity:.3}40%{transform:scale(1);opacity:1}}
+p.msg{position:fixed;bottom:24px;width:100%;text-align:center;color:#999;font-size:13px}
+</style></head>
+<body><div class="dots"><span></span><span></span><span></span></div>
+<p class="msg">Preparando seu link…</p>
+<script>
+var delays=[5000,10000,15000],i=0;
+(function retry(){setTimeout(function(){location.reload()},i<delays.length?delays[i++]:20000)})();
+</script></body></html>"""
+
+def loading_response():
+    return HTMLResponse(LOADING_HTML)
+
+def ensure_planob(utm_base, link, retries=0):
+    """Garante o plano B (1 link universal) da UTM. Barato: 1 chamada/UTM/dia."""
+    key = f"planob:{utm_base}"
+    raw = r.get(key)
+    if raw:
+        try:
+            if time.time() - json.loads(raw).get("ts", 0) < 24 * 3600:
+                return
+        except Exception:
+            pass
+    try:
+        entry = create_pool_entry(link, utm_base, retries=retries)
+        r.setex(key, 30 * 3600, json.dumps(entry))
+    except Exception as e:
+        print("Erro planob:", str(e)[:150])
+
+def create_pool_entry(link, utm_base, retries=1):
     utm = f"{utm_prefix(utm_base)}ID{gen_uid()}S{next_number() if USE_SEQUENCE else ''}"
     origin = set_utm(link, utm)
-    short = generate_short_link(origin, utm, retries=1)
+    short = generate_short_link(origin, utm, retries=retries)
     return {"short": short, "utm": utm, "ts": time.time()}
 
 # =============================
@@ -255,8 +293,7 @@ def filler_loop():
                         pb_ok = False
                 if not pb_ok:
                     try:
-                        pb_entry = create_pool_entry(link.decode(), utm_base)
-                        r.setex(pb_key, 30 * 3600, json.dumps(pb_entry))
+                        ensure_planob(utm_base, link.decode())
                         time.sleep(filler_state["interval"])
                     except Exception:
                         pass  # planob é reserva; falha aqui não trava a piscina
@@ -375,6 +412,10 @@ def click(request: Request, full_path: str):
             short = generate_short_link(origin, utm, retries=2)
             entry = {"short": short, "utm": utm, "ts": ts}
             served_from = "live"
+            # primeiro link da UTM: planta o plano B imediatamente (em fundo),
+            # para que tempestades futuras já tenham reserva universal
+            if not r.exists(f"planob:{utm_base}"):
+                threading.Thread(target=ensure_planob, args=(utm_base, link), daemon=True).start()
         except Exception as e:
             print("Erro shortlink live:", str(e)[:200])
             entry = pop_pool(utm_base)
@@ -393,8 +434,19 @@ def click(request: Request, full_path: str):
                             served_from = "lastresort"
                     except Exception:
                         entry = None
+                if not entry:
+                    # plano B ainda não existe: tenta criá-lo AGORA (1 chamada
+                    # rápida) — cobre exatamente o bootstrap de meio de dia
+                    try:
+                        pb = create_pool_entry(link, utm_base, retries=0)
+                        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(pb))
+                        entry = pb
+                        served_from = "lastresort"
+                    except Exception:
+                        entry = None
             if not entry:
-                return JSONResponse({"error": "shopee_link_error"})
+                # NUNCA mostrar erro: tela de carregamento que tenta de novo sozinha
+                return loading_response()
 
     utm = entry["utm"]
 
