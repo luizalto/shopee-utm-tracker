@@ -42,6 +42,9 @@ POOL_TTL = int(os.getenv("POOL_TTL_SECONDS", "172800"))       # 48h
 POOL_MIN = int(os.getenv("POOL_MIN_PER_UTM", "10"))
 POOL_META_HOURS = int(os.getenv("POOL_META_HOURS", "4"))
 POOL_MARGIN = int(os.getenv("POOL_MARGIN", "2"))
+# Reservas por UTM quando em tempestade: divide os candidatos do casamento
+# por horário (R=24 → vizinho 24x mais distante → ~95%+ de acerto na pessoa)
+R_TARGET = int(os.getenv("RESERVA_POOL_SIZE", "24"))
 
 r = redis.from_url(REDIS_URL)
 session = requests.Session()
@@ -226,28 +229,37 @@ var delays=[5000,10000,15000],i=0;
 def loading_response():
     return HTMLResponse(LOADING_HTML)
 
-def create_planob_entry(link, utm_base, retries=0, timeout_s=1.5):
-    """Plano B: utm marcado como RESERVA — identificável no relatório da Shopee."""
-    utm = f"{utm_prefix(utm_base)}RESERVA"
+def create_planob_entry(link, utm_base, idx=1, retries=0, timeout_s=1.5):
+    """Plano B: utm marcado como RESERVA<nn> — identificável no relatório da
+    Shopee e com N reservas por UTM pra refinar o casamento por horário."""
+    utm = f"{utm_prefix(utm_base)}RESERVA{idx:02d}"
     origin = set_utm(link, utm)
     short = generate_short_link(origin, utm, retries=retries, timeout_s=timeout_s)
     return {"short": short, "utm": utm, "ts": time.time()}
 
-def ensure_planob(utm_base, link, retries=0):
-    """Garante o plano B (1 link universal) da UTM. Barato: 1 chamada/UTM/dia."""
-    key = f"planob:{utm_base}"
-    raw = r.get(key)
-    if raw:
-        try:
-            if time.time() - json.loads(raw).get("ts", 0) < 24 * 3600:
-                return
-        except Exception:
-            pass
+def read_planob(utm_base):
+    raw = r.get(f"planob:{utm_base}")
+    if not raw:
+        return []
     try:
-        entry = create_planob_entry(link, utm_base, retries=retries)
-        r.setex(key, 30 * 3600, json.dumps(entry))
-    except Exception as e:
-        print("Erro planob:", str(e)[:150])
+        lst = json.loads(raw)
+    except Exception:
+        return []
+    return [e for e in lst if time.time() - e.get("ts", 0) <= 30 * 3600]
+
+def ensure_planob(utm_base, link, count=1, retries=0):
+    """Mantém `count` reservas da UTM (rodízio). Custo: só cria as que faltam."""
+    lst = read_planob(utm_base)
+    if len(lst) >= count and all(time.time() - e.get("ts", 0) < 24 * 3600 for e in lst):
+        return
+    while len(lst) < count:
+        try:
+            lst.append(create_planob_entry(link, utm_base, idx=len(lst) + 1, retries=retries))
+        except Exception as e:
+            print("Erro planob:", str(e)[:150])
+            break
+    if lst:
+        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(lst))
 
 def create_pool_entry(link, utm_base, retries=1, timeout_s=30):
     utm = f"{utm_prefix(utm_base)}ID{gen_uid()}S{next_number() if USE_SEQUENCE else ''}"
@@ -290,21 +302,17 @@ def filler_loop():
                 link = r.get(lastlink_key(utm_base))
                 if not link:
                     continue
-                # PLANO B: mantém 1 link universal por UTM ativa (renova 24h em 24h)
-                pb_key = f"planob:{utm_base}"
-                pb_raw = r.get(pb_key)
-                pb_ok = False
-                if pb_raw:
-                    try:
-                        pb_ok = time.time() - json.loads(pb_raw).get("ts", 0) < 24 * 3600
-                    except Exception:
-                        pb_ok = False
-                if not pb_ok:
-                    try:
-                        ensure_planob(utm_base, link.decode())
+                # PLANO B: UTM em tempestade (usou reserva nas últimas 24h) mantém
+                # R_TARGET reservas; UTM tranquila mantém só 1. Renova 24h em 24h.
+                tempestade = int(r.get(f"lr:{utm_base}") or 0) > 0
+                desejado = R_TARGET if tempestade else 1
+                try:
+                    antes = len(read_planob(utm_base))
+                    ensure_planob(utm_base, link.decode(), count=desejado)
+                    if len(read_planob(utm_base)) > antes:
                         time.sleep(filler_state["interval"])
-                    except Exception:
-                        pass  # planob é reserva; falha aqui não trava a piscina
+                except Exception:
+                    pass  # planob é reserva; falha aqui não trava a piscina
                 for _ in range(min(deficit, 25)):
                     if pool_total() >= POOL_MAX_TOTAL:
                         break
@@ -435,21 +443,24 @@ def click(request: Request, full_path: str):
                 # PLANO B: link universal da UTM — último caso, só para não
                 # perder o clique/cookie. Identidade compartilhada (quem criou),
                 # aceita de propósito: comissão e UTM preservadas.
-                raw = r.get(f"planob:{utm_base}")
-                if raw:
-                    try:
-                        candidate = json.loads(raw)
-                        if time.time() - candidate.get("ts", 0) <= 30 * 3600:
-                            entry = candidate
-                            served_from = "lastresort"
-                    except Exception:
-                        entry = None
+                # Rodízio entre as reservas da UTM: cada RESERVA<nn> vira um
+                # grupo menor de candidatos no casamento por horário do sync.
+                reserves = read_planob(utm_base)
+                if reserves:
+                    i = int(r.incr(f"planobidx:{utm_base}")) - 1
+                    entry = reserves[i % len(reserves)]
+                    served_from = "lastresort"
+                    r.incr(f"lr:{utm_base}")
+                    r.expire(f"lr:{utm_base}", 24 * 3600)
+                    # tempestade detectada: escalone reservas até R_TARGET (fundo)
+                    if len(reserves) < R_TARGET:
+                        threading.Thread(target=ensure_planob, args=(utm_base, link, R_TARGET), daemon=True).start()
                 if not entry:
                     # plano B ainda não existe: tenta criá-lo AGORA (1 chamada
                     # rápida, timeout curto) — cobre exatamente o bootstrap de meio de dia
                     try:
-                        pb = create_planob_entry(link, utm_base, retries=0, timeout_s=1.5)
-                        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(pb))
+                        pb = create_planob_entry(link, utm_base, idx=1, retries=0, timeout_s=1.5)
+                        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps([pb]))
                         entry = pb
                         served_from = "lastresort"
                     except Exception:
