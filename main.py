@@ -124,7 +124,7 @@ def is_rate_limit(payload):
         pass
     return False
 
-def generate_short_link(origin_url, subid, retries=1):
+def generate_short_link(origin_url, subid, retries=1, timeout_s=30):
     payload = {
         "query": f"""
         mutation {{
@@ -149,18 +149,19 @@ def generate_short_link(origin_url, subid, retries=1):
             "Content-Type": "application/json",
         }
         try:
-            resp = session.post(SHOPEE_ENDPOINT, data=payload, headers=headers, timeout=30)
+            resp = session.post(SHOPEE_ENDPOINT, data=payload, headers=headers, timeout=timeout_s)
             j = resp.json()
         except Exception as e:
             last_err = e
-            time.sleep(1.5 * (attempt + 1))
+            if attempt < retries:
+                time.sleep(0.4 * (attempt + 1))
             continue
         if "data" in j:
             return j["data"]["generateShortLink"]["shortLink"]
         err = ShopeeApiError(j)
         last_err = err
-        if is_rate_limit(j) and attempt < retries:
-            time.sleep(1.5 * (attempt + 1))
+        if attempt < retries:
+            time.sleep(0.4 * (attempt + 1))
             continue
         raise err
     raise last_err if last_err else Exception("shopee_unknown")
@@ -241,10 +242,10 @@ def ensure_planob(utm_base, link, retries=0):
     except Exception as e:
         print("Erro planob:", str(e)[:150])
 
-def create_pool_entry(link, utm_base, retries=1):
+def create_pool_entry(link, utm_base, retries=1, timeout_s=30):
     utm = f"{utm_prefix(utm_base)}ID{gen_uid()}S{next_number() if USE_SEQUENCE else ''}"
     origin = set_utm(link, utm)
-    short = generate_short_link(origin, utm, retries=retries)
+    short = generate_short_link(origin, utm, retries=retries, timeout_s=timeout_s)
     return {"short": short, "utm": utm, "ts": time.time()}
 
 # =============================
@@ -409,7 +410,9 @@ def click(request: Request, full_path: str):
         utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
         origin = set_utm(link, utm)
         try:
-            short = generate_short_link(origin, utm, retries=2)
+            # orçamento de ~1s: 1 tentativa rápida; se a Shopee não responder
+            # em 0,9s, cai direto pro plano B sem espera adicional
+            short = generate_short_link(origin, utm, retries=0, timeout_s=0.9)
             entry = {"short": short, "utm": utm, "ts": ts}
             served_from = "live"
             # primeiro link da UTM: planta o plano B imediatamente (em fundo),
@@ -436,9 +439,9 @@ def click(request: Request, full_path: str):
                         entry = None
                 if not entry:
                     # plano B ainda não existe: tenta criá-lo AGORA (1 chamada
-                    # rápida) — cobre exatamente o bootstrap de meio de dia
+                    # rápida, timeout curto) — cobre exatamente o bootstrap de meio de dia
                     try:
-                        pb = create_pool_entry(link, utm_base, retries=0)
+                        pb = create_pool_entry(link, utm_base, retries=0, timeout_s=1.5)
                         r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(pb))
                         entry = pb
                         served_from = "lastresort"
