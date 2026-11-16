@@ -465,7 +465,7 @@ def click(request: Request, full_path: str):
         now_br = datetime.datetime.now(tz).strftime("%d/%m/%Y, %H:%M:%S")
         sheet_payload = {
             "data_hora": now_br,
-            "external_id": extract_uid(utm),
+            "external_id": uid,
             "fbc": fbc,
             "fbp": fbp,
             "client_ip_address": ip,
