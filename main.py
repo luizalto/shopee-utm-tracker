@@ -423,8 +423,14 @@ def click(request: Request, full_path: str):
     reserves = read_planob(utm_base)
     if reserves:
         alvo = desired_reservas(utm_base)
-        idx = (n_minuto - 1) % alvo
-        entry = reserves[idx] if idx < len(reserves) else reserves[(n_minuto - 1) % len(reserves)]
+        # Rodízio sobre as reservas QUE EXISTEM agora: clique 1→RESERVA01,
+        # 2→RESERVA02, ... última→volta pro 1. Usar o tamanho real da lista
+        # (e não o alvo) é o que faz o rodízio acompanhar o crescimento:
+        # com 1 reserva serve a 1; quando a 2 nasce, alterna 1,2; e assim
+        # vai até o alvo. Com módulo pelo alvo, enquanto existisse só 1
+        # reserva todo clique caía no fallback e sempre servia RESERVA01.
+        idx = (n_minuto - 1) % len(reserves)
+        entry = reserves[idx]
         served_from = "reserva"
         r.incr(f"lr:{utm_base}")
         r.expire(f"lr:{utm_base}", 24 * 3600)
