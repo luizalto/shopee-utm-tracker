@@ -226,6 +226,13 @@ var delays=[5000,10000,15000],i=0;
 def loading_response():
     return HTMLResponse(LOADING_HTML)
 
+def create_planob_entry(link, utm_base, retries=0, timeout_s=1.5):
+    """Plano B: utm marcado como RESERVA — identificável no relatório da Shopee."""
+    utm = f"{utm_prefix(utm_base)}RESERVA"
+    origin = set_utm(link, utm)
+    short = generate_short_link(origin, utm, retries=retries, timeout_s=timeout_s)
+    return {"short": short, "utm": utm, "ts": time.time()}
+
 def ensure_planob(utm_base, link, retries=0):
     """Garante o plano B (1 link universal) da UTM. Barato: 1 chamada/UTM/dia."""
     key = f"planob:{utm_base}"
@@ -237,7 +244,7 @@ def ensure_planob(utm_base, link, retries=0):
         except Exception:
             pass
     try:
-        entry = create_pool_entry(link, utm_base, retries=retries)
+        entry = create_planob_entry(link, utm_base, retries=retries)
         r.setex(key, 30 * 3600, json.dumps(entry))
     except Exception as e:
         print("Erro planob:", str(e)[:150])
@@ -441,7 +448,7 @@ def click(request: Request, full_path: str):
                     # plano B ainda não existe: tenta criá-lo AGORA (1 chamada
                     # rápida, timeout curto) — cobre exatamente o bootstrap de meio de dia
                     try:
-                        pb = create_pool_entry(link, utm_base, retries=0, timeout_s=1.5)
+                        pb = create_planob_entry(link, utm_base, retries=0, timeout_s=1.5)
                         r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(pb))
                         entry = pb
                         served_from = "lastresort"
