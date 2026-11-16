@@ -47,6 +47,45 @@ POOL_MARGIN = int(os.getenv("POOL_MARGIN", "2"))
 # RESERVA<k> só reencontra gente do seu minuto → 1 candidato por compra → ~100%.
 RESERVA_MAX = int(os.getenv("RESERVA_MAX", "500"))
 RESERVA_MIN = int(os.getenv("RESERVA_MIN", "5"))
+# ORÇAMENTO CENTRALIZADO de chamadas à API da Shopee (compartilhado entre todas
+# as instâncias do Render via Redis). O limitador da Shopee conta TENTATIVAS —
+# chamada que falha por rate limit também consome a cota. Sem esse teto, as
+# threads de reenchimento disparam centenas de chamadas/min e sufocam as
+# gerações ao vivo (medido: 9.456 chamadas mortas/30min derrubaram tudo).
+# Prioridade: atender clique ao vivo > criar reserva. Criação de reserva é
+# barata em volume (5-40 por UTM, reusada por rodízio) — ao vivo é 1 chamada
+# por clique sem reserva.
+API_BUDGET_PER_MIN = int(os.getenv("API_BUDGET_PER_MIN", "20"))       # teto total/min (fleet)
+RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "4")) # fatia para criar reservas
+LIVE_BUDGET_PER_MIN = max(1, API_BUDGET_PER_MIN - RESERVE_BUDGET_PER_MIN)
+
+def try_consume_budget(kind, limit):
+    """Consome 1 unidade do orçamento `kind` do minuto corrente (fleet-wide).
+    Retorna True se dentro do limite. 1 INCR atômico no Redis — seguro com
+    várias instâncias."""
+    try:
+        k = f"apibudget:{kind}:{int(time.time()) // 60}"
+        pipe = r.pipeline()
+        pipe.incr(k)
+        pipe.expire(k, 180)
+        n, _ = pipe.execute()
+        return n <= limit
+    except Exception:
+        return True  # sem Redis não trava o atendimento
+
+def api_block(kind, seconds=15):
+    """Disjuntor: depois de um rate limit, para de gastar chamadas por alguns
+    segundos (o limitador da Shopee precisa respirar)."""
+    try:
+        r.setex(f"apiblock:{kind}", seconds, "1")
+    except Exception:
+        pass
+
+def api_blocked(kind):
+    try:
+        return bool(r.exists(f"apiblock:{kind}"))
+    except Exception:
+        return False
 
 def desired_reservas(utm_base):
     rcmax = int(r.get(f"rcmax:{utm_base}") or 0)
@@ -261,11 +300,15 @@ def ensure_planob(utm_base, link, count=5, retries=0, max_create=1):
         return
     criados = 0
     while len(lst) < count and criados < max_create:
+        if api_blocked("reserva") or not try_consume_budget("reserva", RESERVE_BUDGET_PER_MIN):
+            break
         try:
             lst.append(create_planob_entry(link, utm_base, idx=len(lst) + 1, retries=retries))
             criados += 1
         except Exception as e:
             print("Erro planob:", str(e)[:150])
+            if "10030" in str(e) or "Rate limit" in str(e):
+                api_block("reserva")
             break
     if lst:
         r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(lst))
@@ -280,8 +323,6 @@ def create_pool_entry(link, utm_base, retries=1, timeout_s=30):
 # ENCHADOR (produz links fora de pico / ritmo constante)
 # =============================
 
-filler_state = {"interval": BASE_INTERVAL}
-
 def demand_meta(utm_base):
     now = time.time()
     window = POOL_META_HOURS * 3600
@@ -293,12 +334,14 @@ def demand_meta(utm_base):
     return max(POOL_MIN, recent * POOL_MARGIN)
 
 def filler_loop():
-    """ENCHEDOR DE RESERVAS (piscina desligada): mantém R dinâmico reservas
-    por UTM ativa — R = pico de cliques/minuto observado (teto 500). Renova
-    24h em 24h; o ritmo é o mesmo orçamento de API de antes."""
+    """ENCHEDOR DE RESERVAS: mantém R dinâmico reservas por UTM ativa, dentro
+    do orçamento 'reserva' (RESERVE_BUDGET_PER_MIN/min, compartilhado entre as
+    instâncias via Redis). Prioriza a UTM mais quente primeiro: o orçamento é
+    pequeno de propósito (criação é barata; ao vivo tem prioridade)."""
     time.sleep(30)  # espera o serviço aquecer
     while True:
         try:
+            candidatos = []
             for key in r.scan_iter("dlog:*", count=500):
                 utm_base = key.decode().split(":", 1)[1]
                 if not r.exists(key):
@@ -307,22 +350,19 @@ def filler_loop():
                 link = r.get(lastlink_key(utm_base))
                 if not link:
                     continue
-                desejado = desired_reservas(utm_base)
+                rcmax = int(r.get(f"rcmax:{utm_base}") or 0)
+                candidatos.append((rcmax, utm_base, link.decode()))
+            # mais quentes primeiro: se o orçamento do minuto acabar no meio,
+            # quem mais precisa já foi atendido
+            candidatos.sort(reverse=True)
+            for rcmax, utm_base, link in candidatos:
                 try:
-                    antes = len(read_planob(utm_base))
-                    ensure_planob(utm_base, link.decode(), count=desejado)
-                    if len(read_planob(utm_base)) > antes:
-                        time.sleep(filler_state["interval"])
-                except ShopeeApiError as e:
-                    if is_rate_limit(e.payload):
-                        filler_state["interval"] = min(30.0, filler_state["interval"] * 1.6)
-                        print("Rate limit no filler; novo ritmo(s):", round(filler_state["interval"], 1))
-                        time.sleep(10)
+                    ensure_planob(utm_base, link, count=desired_reservas(utm_base))
                 except Exception:
                     pass
         except Exception as e:
             print("Erro filler:", str(e)[:200])
-        time.sleep(15)
+        time.sleep(20)
 
 threading.Thread(target=filler_loop, daemon=True).start()
 
@@ -439,25 +479,40 @@ def click(request: Request, full_path: str):
         if len(reserves) < alvo:
             threading.Thread(target=ensure_planob, args=(utm_base, link, alvo, 0, 3), daemon=True).start()
     if not entry:
-        # AO VIVO em segundo plano: 1 tentativa rápida (0,9s)
-        utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
-        origin = set_utm(link, utm)
-        try:
-            short = generate_short_link(origin, utm, retries=0, timeout_s=0.9)
-            entry = {"short": short, "utm": utm, "ts": ts}
-            served_from = "live"
-            # primeira vez da UTM: planta a reserva imediatamente (em fundo)
-            threading.Thread(target=ensure_planob, args=(utm_base, link), daemon=True).start()
-        except Exception as e:
-            print("Erro shortlink live:", str(e)[:200])
-            # última chance: criar a reserva AGORA e servir ela
+        # AO VIVO em segundo plano: 1 tentativa rápida (0,9s) — SOMENTE se
+        # houver orçamento no minuto. Fora do orçamento vai direto pra tela de
+        # espera (que tenta de novo em segundos), sem torrar a cota da Shopee.
+        if not api_blocked("live") and try_consume_budget("live", LIVE_BUDGET_PER_MIN):
+            utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
+            origin = set_utm(link, utm)
             try:
-                pb = create_planob_entry(link, utm_base, idx=1, retries=0, timeout_s=1.5)
-                r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps([pb]))
-                entry = pb
-                served_from = "reserva"
-            except Exception:
-                entry = None
+                short = generate_short_link(origin, utm, retries=0, timeout_s=0.9)
+                entry = {"short": short, "utm": utm, "ts": ts}
+                served_from = "live"
+                # primeira vez da UTM: planta a reserva imediatamente (em fundo,
+                # orçamento de reserva — não compete com o ao vivo)
+                threading.Thread(target=ensure_planob, args=(utm_base, link), daemon=True).start()
+            except Exception as e:
+                print("Erro shortlink live:", str(e)[:200])
+                if "10030" in str(e) or "Rate limit" in str(e):
+                    api_block("live")
+                # última chance: criar a reserva AGORA e servir ela (anexa à
+                # lista existente em vez de sobrescrever — sobrescrever apagava
+                # as reservas que já existiam e travava o crescimento no 01)
+                if try_consume_budget("reserva", RESERVE_BUDGET_PER_MIN):
+                    try:
+                        existing = read_planob(utm_base)
+                        used = {e2.get("utm", "") for e2 in existing}
+                        idx_livre = 1
+                        while f"{utm_prefix(utm_base)}RESERVA{idx_livre:02d}" in used:
+                            idx_livre += 1
+                        pb = create_planob_entry(link, utm_base, idx=idx_livre, retries=0, timeout_s=1.5)
+                        existing.append(pb)
+                        r.setex(f"planob:{utm_base}", 30 * 3600, json.dumps(existing))
+                        entry = pb
+                        served_from = "reserva"
+                    except Exception:
+                        entry = None
     if not entry:
         # NUNCA mostrar erro: tela de carregamento que tenta de novo sozinha
         return loading_response()
