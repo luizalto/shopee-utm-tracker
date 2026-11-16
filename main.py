@@ -455,11 +455,12 @@ def click(request: Request, full_path: str):
         "utm": utm, "ip": ip, "ua": ua, "fbp": fbp, "fbc": fbc, "uid": uid,
     }))
 
-    # ===== planilha: só grava quando o HTML novo manda fbp (handshake de deploy) =====
+    # ===== planilha: só grava quando o HTML novo manda fbp (handshake de deploy).
+    # ASSÍNCRONA: o redirecionamento não espera o Google responder (economiza 1-3s/clique) =====
     if request.query_params.get("fbp"):
         tz = datetime.timezone(datetime.timedelta(hours=-3))
         now_br = datetime.datetime.now(tz).strftime("%d/%m/%Y, %H:%M:%S")
-        write_sheet_row({
+        sheet_payload = {
             "data_hora": now_br,
             "external_id": extract_uid(utm),
             "fbc": fbc,
@@ -469,7 +470,8 @@ def click(request: Request, full_path: str):
             "uc_completo": utm,
             "geo_data": request.query_params.get("geo", ""),
             "page_url": request.query_params.get("pageurl", ""),
-        })
+        }
+        threading.Thread(target=write_sheet_row, args=(sheet_payload,), daemon=True).start()
 
     # ===== Meta server-side (dedup com o navegador pelo event_id) =====
     events = []
