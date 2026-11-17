@@ -446,18 +446,24 @@ def click(request: Request, full_path: str):
     r.ltrim(dlog, -300, -1)
     r.expire(dlog, 48 * 3600)
     r.setex(lastlink_key(utm_base), 7 * 24 * 3600, link)
-    # ordinal do clique DENTRO do minuto (define a reserva do rodízio em tempo real)
+    # ordinal do clique DENTRO do minuto (mede o pico p/ dimensionar reservas)
     rc_key = f"rc:{utm_base}:{ts // 60}"
     n_minuto = int(r.incr(rc_key))
     r.expire(rc_key, 2 * 3600)
     if n_minuto > int(r.get(f"rcmax:{utm_base}") or 0):
         r.setex(f"rcmax:{utm_base}", 48 * 3600, n_minuto)
+    # CONTADOR SEQUENCIAL PERSISTENTE da UTM (não reseta a cada minuto):
+    # clique 1→RESERVA01, 2→RESERVA02, ... na última volta pro 1 — mesmo que
+    # os cliques estejam espaçados por horas. É o que garante o rodízio
+    # 1,2,3,... até o último e de volta pro 1, sem travar no 01.
+    n_utm = int(r.incr(f"rot:{utm_base}"))
+    r.expire(f"rot:{utm_base}", 48 * 3600)
 
     # ===== atendimento: RESERVA é o caminho principal (instantâneo) =====
-    # Rodízio amarrado ao TEMPO: o n-ésimo clique do minuto pega a reserva
-    # (n mod R); ao chegar na última, volta pra 1. Cada RESERVA<nn> só
-    # reencontra gente do próprio minuto → 1 candidato no casamento por
-    # horário do sync → ~100% de identidade com external_id da pessoa (coluna B).
+    # Rodízio sequencial persistente: o n-ésimo clique da UTM pega a reserva
+    # (n mod R), 1→01, 2→02, ... última→volta pro 1 — independente de quanto
+    # tempo passou entre cliques. Cada RESERVA<nn> atende ~1/R dos cliques,
+    # então no casamento por horário do sync há poucos candidatos por compra.
     entry = None
     served_from = None
     reserves = read_planob(utm_base)
@@ -469,7 +475,7 @@ def click(request: Request, full_path: str):
         # com 1 reserva serve a 1; quando a 2 nasce, alterna 1,2; e assim
         # vai até o alvo. Com módulo pelo alvo, enquanto existisse só 1
         # reserva todo clique caía no fallback e sempre servia RESERVA01.
-        idx = (n_minuto - 1) % len(reserves)
+        idx = (n_utm - 1) % len(reserves)
         entry = reserves[idx]
         served_from = "reserva"
         r.incr(f"lr:{utm_base}")
