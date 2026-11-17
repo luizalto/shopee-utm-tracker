@@ -56,7 +56,7 @@ RESERVA_MIN = int(os.getenv("RESERVA_MIN", "5"))
 # barata em volume (5-40 por UTM, reusada por rodízio) — ao vivo é 1 chamada
 # por clique sem reserva.
 API_BUDGET_PER_MIN = int(os.getenv("API_BUDGET_PER_MIN", "20"))       # teto total/min (fleet)
-RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "4")) # fatia para criar reservas
+RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "6")) # fatia para criar reservas
 LIVE_BUDGET_PER_MIN = max(1, API_BUDGET_PER_MIN - RESERVE_BUDGET_PER_MIN)
 
 def try_consume_budget(kind, limit):
@@ -502,7 +502,12 @@ def click(request: Request, full_path: str):
         # houver orçamento no minuto. Fora do orçamento vai direto pra tela de
         # espera (que tenta de novo em segundos), sem torrar a cota da Shopee.
         if not api_blocked("live") and try_consume_budget("live", LIVE_BUDGET_PER_MIN):
-            utm = f"{utm_base}{next_number() if USE_SEQUENCE else ''}"
+            # utm do plano B (ao vivo) TEM que carregar o identificador da
+            # pessoa — sem isso a venda chega com utm pelada e o sync não
+            # consegue casar com a planilha. Formato: <base>ID<uid13>[S<n>],
+            # o mesmo padrão que o extract_uid reconhece (ID + 13 chars).
+            seq = f"S{next_number()}" if USE_SEQUENCE else ""
+            utm = f"{utm_base}ID{uid}{seq}"
             origin = set_utm(link, utm)
             try:
                 short = generate_short_link(origin, utm, retries=0, timeout_s=0.9)
