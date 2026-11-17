@@ -344,6 +344,11 @@ def filler_loop():
             candidatos = []
             for key in r.scan_iter("dlog:*", count=500):
                 utm_base = key.decode().split(":", 1)[1]
+                # LIXO DO PERÍODO BUGADO: chave por pessoa (com ID dinâmico).
+                # Não é uma campanha real — apaga o rastro e não gasta API.
+                if utm_base != utm_prefix(utm_base):
+                    r.delete(key)
+                    continue
                 if not r.exists(key):
                     r.delete(f"planob:{utm_base}")
                     continue
@@ -437,7 +442,15 @@ def click(request: Request, full_path: str):
         pos = ""
     pos = clean(pos)
     uc = clean(uc_raw)
-    utm_base = f"{uc}{pos}"
+    # CHAVE POR CAMPANHA (base), NÃO POR PESSOA: o uc vem com o ID dinâmico
+    # da pessoa no meio (ex.: N200U4672LIURUPRSFIDabc123). Se usar a string
+    # inteira como chave, cada pessoa tem sua própria gaveta de reservas —
+    # nunca acumula, nunca faz rodízio e o enchador vê milhares de UTMs
+    # falsas (1 por pessoa) e satura a API. utm_prefix extrai a base
+    # (N200U4672) — é por ela que reserva, rodízio, pico e enchador vivem.
+    # O ID da pessoa continua disponível em `uid` (extract_uid) e vai pra
+    # planilha como external_id, como sempre.
+    utm_base = f"{utm_prefix(uc)}{pos}"
     uid = extract_uid(uc)
 
     # demanda (alimenta a meta da piscina e a lista de observação)
