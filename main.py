@@ -404,13 +404,73 @@ def build_event(name, event_id, ts, fbp, fbc, ip, ua, external_id, utm):
 # PLANILHA (gravada pelo tracker, mesmo schema de sempre)
 # =============================
 
-def write_sheet_row(payload):
-    if not SHEETS_URL:
-        return
+# =============================
+# PLANILHA (fila em lote: 1 chamada pro Apps Script a cada N cliques —
+# o post unitário por clique saturava o script e estourava timeout)
+# =============================
+
+SHEET_FLUSH_SECONDS = int(os.getenv("SHEET_FLUSH_SECONDS", "10"))
+SHEET_BATCH_MAX = int(os.getenv("SHEET_BATCH_MAX", "50"))
+
+def queue_sheet_row(payload):
+    """Empilha o clique na fila (Redis, persiste entre deploys). O timestamp
+    data_hora já foi congelado no handler — atraso de entrega não afeta o
+    match por horário."""
     try:
-        session.post(SHEETS_URL, json=payload, timeout=8)
-    except Exception as e:
-        print("Erro planilha:", str(e)[:200])
+        r.rpush("sheetq", json.dumps(payload, ensure_ascii=False))
+        r.expire("sheetq", 24 * 3600)
+    except Exception:
+        pass
+
+def sheet_flusher_loop():
+    """Uma instância por vez (lock no Redis) varre a fila e manda o lote.
+    Script NOVO responde {ok, appended}; script ANTIGO cai no fallback
+    unitário (funciona mesmo antes de você atualizar o Apps Script)."""
+    time.sleep(20)
+    while True:
+        try:
+            lock = r.set("sheetflush:lock", "1", nx=True, ex=60)
+            if not lock:
+                time.sleep(SHEET_FLUSH_SECONDS)
+                continue
+            while True:
+                batch_raw = r.lrange("sheetq", 0, SHEET_BATCH_MAX - 1)
+                if not batch_raw:
+                    break
+                rows = []
+                for raw in batch_raw:
+                    try:
+                        rows.append(json.loads(raw))
+                    except Exception:
+                        pass
+                if not rows:
+                    r.ltrim("sheetq", len(batch_raw), -1)
+                    continue
+                enviado = False
+                try:
+                    resp = session.post(SHEETS_URL, json={"rows": rows}, timeout=45)
+                    ack = resp.json()
+                    if ack.get("ok") and "appended" in ack:
+                        enviado = True
+                except Exception as e:
+                    print("Erro planilha (lote):", str(e)[:150])
+                if not enviado:
+                    # script antigo (sem suporte a rows) ou erro: unitário
+                    try:
+                        for row in rows:
+                            session.post(SHEETS_URL, json=row, timeout=15)
+                        enviado = True
+                    except Exception as e:
+                        print("Erro planilha (unitario):", str(e)[:150])
+                if enviado:
+                    r.ltrim("sheetq", len(batch_raw), -1)
+                else:
+                    break  # mantém na fila; tenta no próximo ciclo
+        except Exception as e:
+            print("Erro flusher planilha:", str(e)[:150])
+        time.sleep(SHEET_FLUSH_SECONDS)
+
+threading.Thread(target=sheet_flusher_loop, daemon=True).start()
 
 # =============================
 # CLICK
@@ -568,7 +628,7 @@ def click(request: Request, full_path: str):
             "geo_data": request.query_params.get("geo", ""),
             "page_url": request.query_params.get("pageurl", ""),
         }
-        threading.Thread(target=write_sheet_row, args=(sheet_payload,), daemon=True).start()
+        queue_sheet_row(sheet_payload)
 
     # ===== Meta server-side (dedup com o navegador pelo event_id) =====
     events = []
