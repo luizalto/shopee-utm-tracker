@@ -56,7 +56,7 @@ RESERVA_MIN = int(os.getenv("RESERVA_MIN", "10"))
 # barata em volume (5-40 por UTM, reusada por rodízio) — ao vivo é 1 chamada
 # por clique sem reserva.
 API_BUDGET_PER_MIN = int(os.getenv("API_BUDGET_PER_MIN", "20"))       # teto total/min (fleet)
-RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "8")) # fatia para criar reservas
+RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "10")) # fatia para criar reservas
 LIVE_BUDGET_PER_MIN = max(1, API_BUDGET_PER_MIN - RESERVE_BUDGET_PER_MIN)
 
 def try_consume_budget(kind, limit):
