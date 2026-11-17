@@ -46,7 +46,7 @@ POOL_MARGIN = int(os.getenv("POOL_MARGIN", "2"))
 # O índice do rodízio amarra ao ordinal do clique DENTRO do minuto: cada
 # RESERVA<k> só reencontra gente do seu minuto → 1 candidato por compra → ~100%.
 RESERVA_MAX = int(os.getenv("RESERVA_MAX", "500"))
-RESERVA_MIN = int(os.getenv("RESERVA_MIN", "5"))
+RESERVA_MIN = int(os.getenv("RESERVA_MIN", "10"))
 # ORÇAMENTO CENTRALIZADO de chamadas à API da Shopee (compartilhado entre todas
 # as instâncias do Render via Redis). O limitador da Shopee conta TENTATIVAS —
 # chamada que falha por rate limit também consome a cota. Sem esse teto, as
@@ -56,7 +56,7 @@ RESERVA_MIN = int(os.getenv("RESERVA_MIN", "5"))
 # barata em volume (5-40 por UTM, reusada por rodízio) — ao vivo é 1 chamada
 # por clique sem reserva.
 API_BUDGET_PER_MIN = int(os.getenv("API_BUDGET_PER_MIN", "20"))       # teto total/min (fleet)
-RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "6")) # fatia para criar reservas
+RESERVE_BUDGET_PER_MIN = int(os.getenv("RESERVE_BUDGET_PER_MIN", "8")) # fatia para criar reservas
 LIVE_BUDGET_PER_MIN = max(1, API_BUDGET_PER_MIN - RESERVE_BUDGET_PER_MIN)
 
 def try_consume_budget(kind, limit):
