@@ -465,15 +465,8 @@ def click(request: Request, full_path: str):
     r.expire(rc_key, 2 * 3600)
     if n_minuto > int(r.get(f"rcmax:{utm_base}") or 0):
         r.setex(f"rcmax:{utm_base}", 48 * 3600, n_minuto)
-    # CONTADOR SEQUENCIAL PERSISTENTE da UTM (não reseta a cada minuto):
-    # clique 1→RESERVA01, 2→RESERVA02, ... na última volta pro 1 — mesmo que
-    # os cliques estejam espaçados por horas. É o que garante o rodízio
-    # 1,2,3,... até o último e de volta pro 1, sem travar no 01.
-    n_utm = int(r.incr(f"rot:{utm_base}"))
-    r.expire(f"rot:{utm_base}", 48 * 3600)
 
     # ===== atendimento: RESERVA é o caminho principal (instantâneo) =====
-    # Rodízio sequencial persistente: o n-ésimo clique da UTM pega a reserva
     # (n mod R), 1→01, 2→02, ... última→volta pro 1 — independente de quanto
     # tempo passou entre cliques. Cada RESERVA<nn> atende ~1/R dos cliques,
     # então no casamento por horário do sync há poucos candidatos por compra.
@@ -482,14 +475,24 @@ def click(request: Request, full_path: str):
     reserves = read_planob(utm_base)
     if reserves:
         alvo = desired_reservas(utm_base)
-        # Rodízio sobre as reservas QUE EXISTEM agora: clique 1→RESERVA01,
-        # 2→RESERVA02, ... última→volta pro 1. Usar o tamanho real da lista
-        # (e não o alvo) é o que faz o rodízio acompanhar o crescimento:
-        # com 1 reserva serve a 1; quando a 2 nasce, alterna 1,2; e assim
-        # vai até o alvo. Com módulo pelo alvo, enquanto existisse só 1
-        # reserva todo clique caía no fallback e sempre servia RESERVA01.
-        idx = (n_utm - 1) % len(reserves)
-        entry = reserves[idx]
+        # Rodízio LRU: serve a reserva MENOS recentemente usada. Reserva nunca
+        # usada entra primeiro — o crescimento 1,2,3,... acontece natural na
+        # primeira volta; depois alterna estritamente pela mais antiga. Com R
+        # reservas, a mesma só repete depois das outras R-1 servidas →
+        # espaçamento MÁXIMO entre cliques com o MESMO utm: dois cliques a
+        # 1s de distância nunca pegam a mesma reserva (com R≥2), e o casamento
+        # por horário do sync quase não vê candidatos colados. ZSET no Redis
+        # compartilhado — correto entre as várias instâncias.
+        zl = r.zrange(f"lrs:{utm_base}", 0, -1, withscores=True)
+        lrs = {m.decode(): sc for m, sc in zl}
+        entry = min(
+            enumerate(reserves),
+            key=lambda t: (lrs.get(t[1].get("utm", ""), 0.0), t[0]),
+        )[1]
+        pipe = r.pipeline()
+        pipe.zadd(f"lrs:{utm_base}", {entry["utm"]: ts})
+        pipe.expire(f"lrs:{utm_base}", 48 * 3600)
+        pipe.execute()
         served_from = "reserva"
         r.incr(f"lr:{utm_base}")
         r.expire(f"lr:{utm_base}", 24 * 3600)
